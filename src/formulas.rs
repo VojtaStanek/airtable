@@ -24,6 +24,7 @@ impl Operator {
 #[derive(Clone, Debug)]
 pub enum Function {
     RecordId,
+    And(Vec<Expression>),
     Or(Vec<Expression>),
     Find(Box<Expression>, Box<Expression>),
     ArrayJoin(Box<Expression>),
@@ -33,6 +34,17 @@ impl Function {
     fn to_formula(&self) -> anyhow::Result<String> {
         match self {
             Function::RecordId => Ok("RECORD_ID()".to_string()),
+            Function::And(args) => {
+                if args.is_empty() {
+                    return Ok("TRUE()".to_string());
+                }
+                let args_str = args
+                    .iter()
+                    .map(|arg| arg.to_formula())
+                    .collect::<anyhow::Result<Vec<String>>>()?
+                    .join(", ");
+                Ok(format!("AND({})", args_str))
+            }
             Function::Or(args) => {
                 if args.is_empty() {
                     return Ok("FALSE()".to_string());
