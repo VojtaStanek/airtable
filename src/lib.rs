@@ -59,7 +59,8 @@ pub struct Airtable {
     pub(crate) client: reqwest_middleware::ClientWithMiddleware,
 }
 
-/// Get the API key from the AIRTABLE_API_KEY env variable.
+/// Get the API key from the `AIRTABLE_API_KEY` env variable.
+#[must_use]
 pub fn api_key_from_env() -> String {
     env::var("AIRTABLE_API_KEY").unwrap_or_default()
 }
@@ -79,12 +80,15 @@ impl Airtable {
         let http = reqwest::Client::builder().build();
         match http {
             Ok(c) => {
-                let retry_policy = reqwest_retry::policies::ExponentialBackoff::builder().build_with_max_retries(3);
+                let retry_policy = reqwest_retry::policies::ExponentialBackoff::builder()
+                    .build_with_max_retries(3);
                 let client = reqwest_middleware::ClientBuilder::new(c)
                     // Trace HTTP requests. See the tracing crate to make use of these traces.
                     .with(reqwest_tracing::TracingMiddleware::default())
                     // Retry failed requests.
-                    .with(reqwest_retry::RetryTransientMiddleware::new_with_policy(retry_policy))
+                    .with(reqwest_retry::RetryTransientMiddleware::new_with_policy(
+                        retry_policy,
+                    ))
                     .build();
 
                 Self {
@@ -103,6 +107,7 @@ impl Airtable {
     /// takes a type that can convert into
     /// an &str (`String` or `Vec<u8>` for example). As long as the function is
     /// given a valid API Key and Base ID your requests will work.
+    #[must_use]
     pub fn new_from_env() -> Self {
         let base_id = env::var("AIRTABLE_BASE_ID").unwrap_or_default();
         let enterprise_account_id = env::var("AIRTABLE_ENTERPRISE_ACCOUNT_ID").unwrap_or_default();
@@ -111,6 +116,7 @@ impl Airtable {
     }
 
     /// Get the currently set API key.
+    #[must_use]
     pub fn get_key(&self) -> &str {
         &self.key
     }
@@ -126,7 +132,7 @@ impl Airtable {
         B: Serialize,
     {
         let base = Url::parse(ENDPOINT)?;
-        let url = base.join(&(self.base_id.to_string() + "/" + &path))?;
+        let url = base.join(&(self.base_id.clone() + "/" + &path))?;
 
         let bt = format!("Bearer {}", self.key);
         let bearer = header::HeaderValue::from_str(&bt)?;
@@ -178,7 +184,7 @@ impl Airtable {
             s => {
                 bail!("status code: {}, body: {}", s, resp.text().await?);
             }
-        };
+        }
 
         // Try to deserialize the response.
         let mut r: APICall<T> = resp.json().await?;
@@ -207,7 +213,7 @@ impl Airtable {
                 s => {
                     bail!("status code: {}, body: {}", s, resp.text().await?);
                 }
-            };
+            }
 
             // Try to deserialize the response.
             r = resp.json().await?;
@@ -220,12 +226,22 @@ impl Airtable {
         Ok(records)
     }
 
-    pub fn pages<T: DeserializeOwned>(&self, table: &str, view: &str, fields: Vec<&str>) -> Pages<T> {
+    #[must_use]
+    pub fn pages<T: DeserializeOwned>(
+        &self,
+        table: &str,
+        view: &str,
+        fields: Vec<&str>,
+    ) -> Pages<'_, T> {
         Pages::new(self, table, view, &fields)
     }
 
     /// Get record from a table.
-    pub async fn get_record<T: DeserializeOwned>(&self, table: &str, record_id: &str) -> Result<Record<T>> {
+    pub async fn get_record<T: DeserializeOwned>(
+        &self,
+        table: &str,
+        record_id: &str,
+    ) -> Result<Record<T>> {
         // Build the request.
         let request = self.request(Method::GET, format!("{table}/{record_id}"), (), None)?;
 
@@ -235,7 +251,7 @@ impl Airtable {
             s => {
                 bail!("status code: {}, body: {}", s, resp.text().await?);
             }
-        };
+        }
 
         // Try to deserialize the response.
         let record: Record<T> = resp.json().await?;
@@ -259,7 +275,7 @@ impl Airtable {
             s => {
                 bail!("status code: {}, body: {}", s, resp.text().await?);
             }
-        };
+        }
 
         Ok(())
     }
@@ -268,7 +284,11 @@ impl Airtable {
     ///
     /// Due to limitations on the Airtable API, you can only bulk delete 10
     /// records at a time.
-    pub async fn delete_records(&self, table: &str, record_ids: impl IntoIterator<Item = &str>) -> Result<()> {
+    pub async fn delete_records(
+        &self,
+        table: &str,
+        record_ids: impl IntoIterator<Item = &str>,
+    ) -> Result<()> {
         // Build the request.
         let request = self.request(
             Method::DELETE,
@@ -288,7 +308,7 @@ impl Airtable {
             s => {
                 bail!("status code: {}, body: {}", s, resp.text().await?);
             }
-        };
+        }
 
         Ok(())
     }
@@ -334,7 +354,7 @@ impl Airtable {
             table.to_string(),
             APICall {
                 records,
-                offset: "".to_string(),
+                offset: String::new(),
                 typecast: Some(true),
             },
             None,
@@ -346,7 +366,7 @@ impl Airtable {
             s => {
                 bail!("status code: {}, body: {}", s, resp.text().await?);
             }
-        };
+        }
 
         // Try to deserialize the response.
         let r: APICall<T> = resp.json().await?;
@@ -395,7 +415,7 @@ impl Airtable {
             table.to_string(),
             APICall {
                 records,
-                offset: "".to_string(),
+                offset: String::new(),
                 typecast: Some(true),
             },
             None,
@@ -407,7 +427,7 @@ impl Airtable {
             s => {
                 bail!("status code: {}, body: {}", s, resp.text().await?);
             }
-        };
+        }
 
         // Try to deserialize the response.
         match resp.json::<APICall<T>>().await {
@@ -421,7 +441,7 @@ impl Airtable {
 
     /// List users.
     /// This is for an enterprise admin to do only.
-    /// FROM: https://airtable.com/api/enterprise
+    /// FROM: <https://airtable.com/api/enterprise>
     pub async fn list_users(&self) -> Result<Vec<User>> {
         if self.enterprise_account_id.is_empty() {
             // Return an error early.
@@ -431,7 +451,10 @@ impl Airtable {
         // Build the request.
         let request = self.request(
             Method::GET,
-            format!("v0/meta/enterpriseAccounts/{}/users", self.enterprise_account_id),
+            format!(
+                "v0/meta/enterpriseAccounts/{}/users",
+                self.enterprise_account_id
+            ),
             (),
             Some(vec![("state", "provisioned".to_string())]),
         )?;
@@ -442,7 +465,7 @@ impl Airtable {
             s => {
                 bail!("status code: {}, body: {}", s, resp.text().await?);
             }
-        };
+        }
 
         // Try to deserialize the response.
         let result: UsersResponse = resp.json().await?;
@@ -452,7 +475,7 @@ impl Airtable {
 
     /// Get an enterprise user.
     /// This is for an enterprise admin to do only.
-    /// FROM: https://airtable.com/api/enterprise#enterpriseAccountUserGetInformationByEmail
+    /// FROM: <https://airtable.com/api/enterprise#enterpriseAccountUserGetInformationByEmail>
     /// Permission level can be: owner | create | edit | comment | read
     pub async fn get_enterprise_user(&self, email: &str) -> Result<EnterpriseUser> {
         if self.enterprise_account_id.is_empty() {
@@ -463,7 +486,10 @@ impl Airtable {
         // Build the request.
         let request = self.request(
             Method::GET,
-            format!("v0/meta/enterpriseAccounts/{}/users", self.enterprise_account_id),
+            format!(
+                "v0/meta/enterpriseAccounts/{}/users",
+                self.enterprise_account_id
+            ),
             (),
             Some(vec![
                 ("email", email.to_string()),
@@ -478,7 +504,7 @@ impl Airtable {
             s => {
                 bail!("status code: {}, body: {}", s, resp.text().await?);
             }
-        };
+        }
 
         let r: EnterpriseUsersResponse = resp.json().await?;
 
@@ -486,12 +512,12 @@ impl Airtable {
             bail!("no user was returned");
         }
 
-        Ok(r.users.get(0).unwrap().clone())
+        Ok(r.users.first().unwrap().clone())
     }
 
     /// Add a collaborator to a workspace.
     /// This is for an enterprise admin to do only.
-    /// FROM: https://airtable.com/api/enterprise#enterpriseWorkspaceAddCollaborator
+    /// FROM: <https://airtable.com/api/enterprise#enterpriseWorkspaceAddCollaborator>
     /// Permission level can be: owner | create | edit | comment | read
     pub async fn add_collaborator_to_workspace(
         &self,
@@ -527,14 +553,14 @@ impl Airtable {
             s => {
                 bail!("status code: {}, body: {}", s, resp.text().await?);
             }
-        };
+        }
 
         Ok(())
     }
 
     /// Returns basic information on the workspace. Does not include deleted collaborators
     /// and only include outstanding invites.
-    /// FROM: https://airtable.com/api/enterprise#enterpriseWorkspaceGetInformation
+    /// FROM: <https://airtable.com/api/enterprise#enterpriseWorkspaceGetInformation>
     pub async fn get_enterprise_workspace<const N: usize>(
         &self,
         workspace_id: &str,
@@ -571,7 +597,7 @@ impl Airtable {
             s => {
                 bail!("status code: {}, body: {}", s, resp.text().await?);
             }
-        };
+        }
 
         let r: Workspace = resp.json().await?;
 
@@ -581,7 +607,7 @@ impl Airtable {
     /// Delete internal user by email.
     /// This is for an enterprise admin to do only.
     /// The user must be an internal user, meaning they have an email with the company domain.
-    /// FROM: https://airtable.com/api/enterprise#enterpriseAccountUserDeleteUserByEmail
+    /// FROM: <https://airtable.com/api/enterprise#enterpriseAccountUserDeleteUserByEmail>
     pub async fn delete_internal_user_by_email(&self, email: &str) -> Result<()> {
         if self.enterprise_account_id.is_empty() {
             // Return an error early.
@@ -591,7 +617,10 @@ impl Airtable {
         // Build the request.
         let request = self.request(
             Method::DELETE,
-            format!("v0/meta/enterpriseAccounts/{}/users", self.enterprise_account_id),
+            format!(
+                "v0/meta/enterpriseAccounts/{}/users",
+                self.enterprise_account_id
+            ),
             (),
             Some(vec![("email", email.to_string())]),
         )?;
@@ -602,12 +631,12 @@ impl Airtable {
             s => {
                 bail!("status code: {}, body: {}", s, resp.text().await?);
             }
-        };
+        }
 
         // Try to deserialize the response.
         let result: DeleteUserResponse = resp.json().await?;
         if !result.errors.is_empty() {
-            bail!("body: {:?}", result);
+            bail!("body: {result:?}");
         }
 
         Ok(())
@@ -627,12 +656,16 @@ impl<'a, T> Pages<'a, T>
 where
     T: DeserializeOwned,
 {
+    #[must_use]
     pub fn new(client: &'a Airtable, table: &str, view: &str, fields: &[&str]) -> Self {
         Self {
             client,
             table: table.to_string(),
             view: view.to_string(),
-            fields: fields.iter().map(|s| s.to_string()).collect::<Vec<_>>(),
+            fields: fields
+                .iter()
+                .map(std::string::ToString::to_string)
+                .collect::<Vec<_>>(),
             offset: Some(String::new()),
             record_type: PhantomData,
         }
@@ -644,11 +677,11 @@ where
             return Ok(None);
         }
 
-        let mut params = vec![("pageSize", "100".to_string()), ("view", self.view.to_string())];
+        let mut params = vec![("pageSize", "100".to_string()), ("view", self.view.clone())];
 
         if let Some(offset) = &self.offset {
             if !offset.is_empty() {
-                log::debug!("[airtable-api] Fetching page of results with offset {}", offset);
+                log::debug!("[airtable-api] Fetching page of results with offset {offset}");
                 params.push(("offset", offset.clone()));
             }
         } else {
@@ -656,13 +689,13 @@ where
         }
 
         for field in &self.fields {
-            params.push(("fields[]", field.to_string()));
+            params.push(("fields[]", field.clone()));
         }
 
         // Build the request.
         let request = self
             .client
-            .request(Method::GET, self.table.to_string(), (), Some(params))?;
+            .request(Method::GET, self.table.clone(), (), Some(params))?;
 
         let response = self.client.client.execute(request).await?;
 
@@ -671,16 +704,18 @@ where
                 let api_response: APICall<T> = response.json().await?;
                 log::debug!("[airtable-api] Retrieved page response");
 
-                self.offset = if !api_response.offset.is_empty() {
-                    Some(api_response.offset)
-                } else {
+                self.offset = if api_response.offset.is_empty() {
                     None
+                } else {
+                    Some(api_response.offset)
                 };
 
                 Ok(Some(api_response.records))
             }
             s => {
-                log::debug!("[airtable-api] Pagination request returned an error. Stopping requests.");
+                log::debug!(
+                    "[airtable-api] Pagination request returned an error. Stopping requests."
+                );
 
                 // Once we hit an error we stop pagination
                 self.offset = None;
@@ -744,7 +779,7 @@ impl<'de> Deserialize<'de> for UserField {
     {
         struct UserFieldVisitor;
 
-        impl<'de> Visitor<'de> for UserFieldVisitor {
+        impl Visitor<'_> for UserFieldVisitor {
             type Value = UserField;
 
             fn expecting(&self, formatter: &mut fmt::Formatter) -> fmt::Result {
@@ -859,10 +894,14 @@ pub struct UsersResponse {
 }
 
 /// The response returned from deleting a user.
-/// FROM: https://airtable.com/api/enterprise#enterpriseAccountUserDeleteUserByEmail
+/// FROM: <https://airtable.com/api/enterprise#enterpriseAccountUserDeleteUserByEmail>
 #[derive(Debug, Default, Clone, Serialize, Deserialize)]
 pub struct DeleteUserResponse {
-    #[serde(default, skip_serializing_if = "Vec::is_empty", rename = "deletedUsers")]
+    #[serde(
+        default,
+        skip_serializing_if = "Vec::is_empty",
+        rename = "deletedUsers"
+    )]
     pub deleted_users: Vec<User>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub errors: Vec<ErrorResponse>,
@@ -993,9 +1032,17 @@ pub struct EnterpriseUser {
 
 #[derive(Debug, Default, Clone, Serialize, Deserialize)]
 pub struct Collaborations {
-    #[serde(default, skip_serializing_if = "Vec::is_empty", rename = "workspaceCollaborations")]
+    #[serde(
+        default,
+        skip_serializing_if = "Vec::is_empty",
+        rename = "workspaceCollaborations"
+    )]
     pub workspace_collaborations: Vec<Collaboration>,
-    #[serde(default, skip_serializing_if = "Vec::is_empty", rename = "baseCollaborations")]
+    #[serde(
+        default,
+        skip_serializing_if = "Vec::is_empty",
+        rename = "baseCollaborations"
+    )]
     pub base_collaborations: Vec<Collaboration>,
 }
 
@@ -1033,7 +1080,7 @@ pub struct Collaboration {
     pub workspace_id: String,
 }
 
-/// Optional include flags that can be passed to [get_enterprise_workspace] to control
+/// Optional include flags that can be passed to [`get_enterprise_workspace`] to control
 /// fields are returned
 pub enum WorkspaceIncludes {
     Collaborators,
@@ -1175,7 +1222,7 @@ pub mod user_format_as_array_of_strings {
         for e in array {
             seq.serialize_element(&User {
                 id: Default::default(),
-                email: e.to_string(),
+                email: e.clone(),
                 name: Default::default(),
             })
             .unwrap();
@@ -1198,7 +1245,7 @@ pub mod user_format_as_array_of_strings {
 
         let mut users: Vec<String> = Default::default();
         for a in airtable_users {
-            users.push(a.email.to_string());
+            users.push(a.email.clone());
         }
 
         Ok(users)
@@ -1264,7 +1311,7 @@ pub mod attachment_format_as_array_of_strings {
         let mut seq = serializer.serialize_seq(Some(array.len())).unwrap();
         for e in array {
             let mut attachment: AttachmentShort = Default::default();
-            attachment.url = e.to_string();
+            attachment.url = e.clone();
             seq.serialize_element(&attachment).unwrap();
         }
         seq.end()
@@ -1285,7 +1332,7 @@ pub mod attachment_format_as_array_of_strings {
 
         let mut attachments: Vec<String> = Default::default();
         for a in airtable_attachments {
-            attachments.push(a.url.to_string());
+            attachments.push(a.url.clone());
         }
 
         Ok(attachments)
@@ -1330,7 +1377,7 @@ pub mod attachment_format_as_string {
         let airtable_attachments = deserializer.deserialize_seq(AttachmentsVisitor {}).unwrap();
         let mut url = String::new();
         if !airtable_attachments.is_empty() {
-            url = airtable_attachments[0].url.to_string();
+            url = airtable_attachments[0].url.clone();
         }
         Ok(url)
     }
@@ -1409,7 +1456,7 @@ impl<'de> Deserialize<'de> for BarcodeField {
     {
         struct BarcodeFieldVisitor;
 
-        impl<'de> Visitor<'de> for BarcodeFieldVisitor {
+        impl Visitor<'_> for BarcodeFieldVisitor {
             type Value = BarcodeField;
 
             fn expecting(&self, formatter: &mut fmt::Formatter) -> fmt::Result {
