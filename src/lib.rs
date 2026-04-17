@@ -51,6 +51,7 @@ use serde::{
 const ENDPOINT: &str = "https://api.airtable.com/v0/";
 
 /// Entrypoint for interacting with the Airtable API.
+#[derive(Clone)]
 pub struct Airtable {
     key: String,
     base_id: String,
