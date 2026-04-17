@@ -47,6 +47,11 @@ use serde::{
     Deserialize, Deserializer, Serialize,
 };
 
+pub mod formulas;
+mod list_builder;
+
+pub use list_builder::ListRecords;
+
 /// Endpoint for the Airtable API.
 const ENDPOINT: &str = "https://api.airtable.com/v0/";
 
@@ -206,6 +211,87 @@ impl Airtable {
                     ("view", view.to_string()),
                     ("offset", offset),
                 ]),
+            )?;
+
+            resp = self.client.execute(request).await?;
+            match resp.status() {
+                StatusCode::OK => (),
+                s => {
+                    bail!("status code: {}, body: {}", s, resp.text().await?);
+                }
+            }
+
+            // Try to deserialize the response.
+            r = resp.json().await?;
+
+            records.append(&mut r.records);
+
+            offset = r.offset;
+        }
+
+        Ok(records)
+    }
+
+    /// List records in a table for a particular view.
+    pub async fn list_records_build<T: DeserializeOwned>(
+        &self,
+        builder: &list_builder::ListRecords,
+    ) -> Result<Vec<Record<T>>> {
+        let mut params = vec![("pageSize", "100".to_string())];
+        if let Some(view) = &builder.view_name {
+            params.push(("view", view.to_string()));
+        }
+        for field in &builder.fields {
+            params.push(("fields[]", field.to_string()));
+        }
+        if let Some(max_records) = builder.max_records {
+            params.push(("maxRecords", max_records.to_string()));
+        }
+        if let Some(filter_formula) = &builder.filter_formula {
+            let filter_formula = filter_formula.to_formula()?;
+            params.push(("filterByFormula", filter_formula));
+        }
+
+        tracing::debug!(params = ?params, "Built request parameters for list_records_build");
+
+        // Build the request.
+        let mut request = self.request(
+            Method::GET,
+            builder.table_name.to_string(),
+            (),
+            Some(params.clone()),
+        )?;
+
+        let mut resp = self.client.execute(request).await?;
+        match resp.status() {
+            StatusCode::OK => (),
+            s => {
+                bail!("status code: {}, body: {}", s, resp.text().await?);
+            }
+        }
+
+        // Try to deserialize the response.
+        let mut r: APICall<T> = resp.json().await?;
+
+        let mut records = r.records;
+
+        let mut offset = r.offset;
+
+        // Paginate if we should.
+        // TODO: make this more DRY
+        while !offset.is_empty() {
+            request = self.request(
+                Method::GET,
+                builder.table_name.to_string(),
+                (),
+                Some(
+                    params
+                        .iter()
+                        .filter(|(k, _)| k != &"maxRecords")
+                        .cloned()
+                        .chain(std::iter::once(("offset", offset.clone())))
+                        .collect(),
+                ),
             )?;
 
             resp = self.client.execute(request).await?;
