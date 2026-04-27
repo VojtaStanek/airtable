@@ -443,6 +443,7 @@ impl Airtable {
                 records,
                 offset: String::new(),
                 typecast: Some(true),
+                perform_upsert: None,
             },
             None,
         )?;
@@ -504,6 +505,77 @@ impl Airtable {
                 records,
                 offset: String::new(),
                 typecast: Some(true),
+                perform_upsert: None,
+            },
+            None,
+        )?;
+
+        let resp = self.client.execute(request).await?;
+        match resp.status() {
+            StatusCode::OK => (),
+            s => {
+                bail!("status code: {}, body: {}", s, resp.text().await?);
+            }
+        }
+
+        // Try to deserialize the response.
+        match resp.json::<APICall<T>>().await {
+            Ok(v) => Ok(v.records),
+            Err(_) => {
+                // This might fail. On a faiture just return an empty vector.
+                Ok(vec![])
+            }
+        }
+    }
+
+    /// Bulk upsert records in a table.
+    pub async fn upsert_records<T: Serialize + DeserializeOwned>(
+        &self,
+        table: &str,
+        fields_to_merge_on: Vec<&str>,
+        records: Vec<Record<T>>,
+    ) -> Result<Vec<Record<T>>> {
+        if records.len() <= 10 {
+            self.upsert_records_inner(table, &fields_to_merge_on, records)
+                .await
+        } else {
+            let mut res = Vec::new();
+
+            let mut records = records.into_iter();
+            while records.len() > 0 {
+                let chunk = (&mut records).take(10).collect();
+                res.extend(
+                    self.upsert_records_inner(table, &fields_to_merge_on, chunk)
+                        .await?,
+                );
+            }
+
+            Ok(res)
+        }
+    }
+
+    /// Bulk update records in a table.
+    ///
+    /// The provided `records` vector MUST contain at most 10 items, or this function will panic.
+    async fn upsert_records_inner<T: Serialize + DeserializeOwned>(
+        &self,
+        table: &str,
+        fields_to_merge_on: &[&str],
+        records: Vec<Record<T>>,
+    ) -> Result<Vec<Record<T>>> {
+        assert!(records.len() <= 10);
+
+        // Build the request.
+        let request = self.request(
+            Method::PATCH,
+            table.to_string(),
+            APICall {
+                records,
+                offset: String::new(),
+                typecast: Some(true),
+                perform_upsert: Some(APICallPerformUpsert {
+                    fields_to_merge_on: fields_to_merge_on.iter().map(|s| s.to_string()).collect(),
+                }),
             },
             None,
         )?;
@@ -828,6 +900,23 @@ struct APICall<T> {
     /// be helpful for integrating with 3rd party data sources.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub typecast: Option<bool>,
+    /// Enables upsert behavior when set. Available with PATCH and PUT method.
+    ///
+    /// See https://airtable.com/developers/web/api/update-multiple-records for more details.
+    #[serde(skip_serializing_if = "Option::is_none", rename = "performUpsert")]
+    pub perform_upsert: Option<APICallPerformUpsert>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct APICallPerformUpsert {
+    /// Records that do not include id will use the fields chosen by fieldsToMergeOn as an external ID to match with existing records.
+    /// - If zero matches are found, a new record will be created.
+    /// - If one match is found, that record will be updated.
+    /// - If multiple matches are found, the request will fail.
+    ///
+    /// Records that include id will ignore fieldsToMergeOn and behave as normal updates. If no record with the given id exists, the request will fail and will not create a new record. The API response for upsert requests will additionally include updatedRecords and createdRecords arrays, indicating which records in the records array already existed and were updated, or did not exist and were created, respectively.
+    #[serde(rename = "fieldsToMergeOn")]
+    fields_to_merge_on: Vec<String>,
 }
 
 /// An Airtable record.
