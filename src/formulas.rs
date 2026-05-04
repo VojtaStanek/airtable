@@ -31,7 +31,7 @@ pub enum Function {
 }
 
 impl Function {
-    fn to_formula(&self) -> anyhow::Result<String> {
+    fn to_formula(&self) -> crate::Result<String> {
         match self {
             Function::RecordId => Ok("RECORD_ID()".to_string()),
             Function::And(args) => {
@@ -41,7 +41,7 @@ impl Function {
                 let args_str = args
                     .iter()
                     .map(|arg| arg.to_formula())
-                    .collect::<anyhow::Result<Vec<String>>>()?
+                    .collect::<crate::Result<Vec<String>>>()?
                     .join(", ");
                 Ok(format!("AND({})", args_str))
             }
@@ -52,7 +52,7 @@ impl Function {
                 let args_str = args
                     .iter()
                     .map(|arg| arg.to_formula())
-                    .collect::<anyhow::Result<Vec<String>>>()?
+                    .collect::<crate::Result<Vec<String>>>()?
                     .join(", ");
                 Ok(format!("OR({})", args_str))
             }
@@ -85,7 +85,7 @@ const ALLOWED_CHARS: [char; 99] = [
 ];
 
 impl Expression {
-    pub fn to_formula(&self) -> anyhow::Result<String> {
+    pub fn to_formula(&self) -> crate::Result<String> {
         match self {
             Expression::Infix(op, left, right) => Ok(format!(
                 "({} {} {})",
@@ -95,14 +95,18 @@ impl Expression {
             )),
             Expression::TextLiteral(s) => {
                 if !s.chars().all(|c| ALLOWED_CHARS.contains(&c)) {
-                    return Err(anyhow::anyhow!("Invalid text literal: {s:?}"));
+                    return Err(crate::Error::InvalidFormulaValue(format!(
+                        "Invalid text literal: {s:?}"
+                    )));
                 }
                 Ok(format!("\"{}\"", s))
             }
             Expression::NumberLiteral(n) => Ok(n.to_string()),
             Expression::FieldReference(name) => {
                 if !name.chars().all(|c| ALLOWED_CHARS.contains(&c)) {
-                    return Err(anyhow::anyhow!("Invalid field name: {name:?}"));
+                    return Err(crate::Error::InvalidFormulaValue(format!(
+                        "Invalid field name: {name:?}"
+                    )));
                 }
                 Ok(format!("{{{}}}", name))
             }

@@ -38,7 +38,6 @@
 #![allow(clippy::field_reassign_with_default)]
 use std::{env, fmt, fmt::Debug, marker::PhantomData};
 
-use anyhow::{bail, Result};
 use chrono::{offset::Utc, DateTime};
 use reqwest::{header, Method, Request, StatusCode, Url};
 use schemars::JsonSchema;
@@ -46,11 +45,37 @@ use serde::{
     de::{DeserializeOwned, MapAccess, SeqAccess, Visitor},
     Deserialize, Deserializer, Serialize,
 };
+use thiserror::Error;
 
 pub mod formulas;
 mod list_builder;
 
 pub use list_builder::ListRecords;
+
+/// Errors returned by the Airtable client.
+#[derive(Debug, Error)]
+pub enum Error {
+    #[error(transparent)]
+    UrlParse(#[from] url::ParseError),
+    #[error(transparent)]
+    InvalidHeaderValue(#[from] reqwest::header::InvalidHeaderValue),
+    #[error(transparent)]
+    Reqwest(#[from] reqwest::Error),
+    #[error(transparent)]
+    ReqwestMiddleware(#[from] reqwest_middleware::Error),
+    #[error("status code: {status}, body: {body}")]
+    ApiError { status: StatusCode, body: String },
+    #[error("enterprise account id is required")]
+    MissingEnterpriseAccountId,
+    #[error("no user was returned")]
+    NoUserReturned,
+    #[error("delete user failed: {0:?}")]
+    DeleteUserFailed(DeleteUserResponse),
+    #[error("invalid formula value: {0}")]
+    InvalidFormulaValue(String),
+}
+
+pub type Result<T> = std::result::Result<T, Error>;
 
 /// Endpoint for the Airtable API.
 const ENDPOINT: &str = "https://api.airtable.com/v0/";
@@ -188,7 +213,10 @@ impl Airtable {
         match resp.status() {
             StatusCode::OK => (),
             s => {
-                bail!("status code: {}, body: {}", s, resp.text().await?);
+                return Err(Error::ApiError {
+                    status: s,
+                    body: resp.text().await?,
+                });
             }
         }
 
@@ -217,7 +245,10 @@ impl Airtable {
             match resp.status() {
                 StatusCode::OK => (),
                 s => {
-                    bail!("status code: {}, body: {}", s, resp.text().await?);
+                    return Err(Error::ApiError {
+                        status: s,
+                        body: resp.text().await?,
+                    });
                 }
             }
 
@@ -266,7 +297,10 @@ impl Airtable {
         match resp.status() {
             StatusCode::OK => (),
             s => {
-                bail!("status code: {}, body: {}", s, resp.text().await?);
+                return Err(Error::ApiError {
+                    status: s,
+                    body: resp.text().await?,
+                });
             }
         }
 
@@ -298,7 +332,10 @@ impl Airtable {
             match resp.status() {
                 StatusCode::OK => (),
                 s => {
-                    bail!("status code: {}, body: {}", s, resp.text().await?);
+                    return Err(Error::ApiError {
+                        status: s,
+                        body: resp.text().await?,
+                    });
                 }
             }
 
@@ -336,7 +373,10 @@ impl Airtable {
         match resp.status() {
             StatusCode::OK => (),
             s => {
-                bail!("status code: {}, body: {}", s, resp.text().await?);
+                return Err(Error::ApiError {
+                    status: s,
+                    body: resp.text().await?,
+                });
             }
         }
 
@@ -360,7 +400,10 @@ impl Airtable {
         match resp.status() {
             StatusCode::OK => (),
             s => {
-                bail!("status code: {}, body: {}", s, resp.text().await?);
+                return Err(Error::ApiError {
+                    status: s,
+                    body: resp.text().await?,
+                });
             }
         }
 
@@ -393,7 +436,10 @@ impl Airtable {
         match resp.status() {
             StatusCode::OK => (),
             s => {
-                bail!("status code: {}, body: {}", s, resp.text().await?);
+                return Err(Error::ApiError {
+                    status: s,
+                    body: resp.text().await?,
+                });
             }
         }
 
@@ -452,7 +498,10 @@ impl Airtable {
         match resp.status() {
             StatusCode::OK => (),
             s => {
-                bail!("status code: {}, body: {}", s, resp.text().await?);
+                return Err(Error::ApiError {
+                    status: s,
+                    body: resp.text().await?,
+                });
             }
         }
 
@@ -514,7 +563,10 @@ impl Airtable {
         match resp.status() {
             StatusCode::OK => (),
             s => {
-                bail!("status code: {}, body: {}", s, resp.text().await?);
+                return Err(Error::ApiError {
+                    status: s,
+                    body: resp.text().await?,
+                });
             }
         }
 
@@ -584,7 +636,10 @@ impl Airtable {
         match resp.status() {
             StatusCode::OK => (),
             s => {
-                bail!("status code: {}, body: {}", s, resp.text().await?);
+                return Err(Error::ApiError {
+                    status: s,
+                    body: resp.text().await?,
+                });
             }
         }
 
@@ -604,7 +659,7 @@ impl Airtable {
     pub async fn list_users(&self) -> Result<Vec<User>> {
         if self.enterprise_account_id.is_empty() {
             // Return an error early.
-            bail!("An enterprise account id is required.");
+            return Err(Error::MissingEnterpriseAccountId);
         }
 
         // Build the request.
@@ -622,7 +677,10 @@ impl Airtable {
         match resp.status() {
             StatusCode::OK => (),
             s => {
-                bail!("status code: {}, body: {}", s, resp.text().await?);
+                return Err(Error::ApiError {
+                    status: s,
+                    body: resp.text().await?,
+                });
             }
         }
 
@@ -639,7 +697,7 @@ impl Airtable {
     pub async fn get_enterprise_user(&self, email: &str) -> Result<EnterpriseUser> {
         if self.enterprise_account_id.is_empty() {
             // Return an error early.
-            bail!("An enterprise account id is required.");
+            return Err(Error::MissingEnterpriseAccountId);
         }
 
         // Build the request.
@@ -661,14 +719,17 @@ impl Airtable {
         match resp.status() {
             StatusCode::OK => (),
             s => {
-                bail!("status code: {}, body: {}", s, resp.text().await?);
+                return Err(Error::ApiError {
+                    status: s,
+                    body: resp.text().await?,
+                });
             }
         }
 
         let r: EnterpriseUsersResponse = resp.json().await?;
 
         if r.users.is_empty() {
-            bail!("no user was returned");
+            return Err(Error::NoUserReturned);
         }
 
         Ok(r.users.first().unwrap().clone())
@@ -686,7 +747,7 @@ impl Airtable {
     ) -> Result<()> {
         if self.enterprise_account_id.is_empty() {
             // Return an error early.
-            bail!("An enterprise account id is required.");
+            return Err(Error::MissingEnterpriseAccountId);
         }
 
         // Build the request.
@@ -710,7 +771,10 @@ impl Airtable {
         match resp.status() {
             StatusCode::OK => (),
             s => {
-                bail!("status code: {}, body: {}", s, resp.text().await?);
+                return Err(Error::ApiError {
+                    status: s,
+                    body: resp.text().await?,
+                });
             }
         }
 
@@ -727,7 +791,7 @@ impl Airtable {
     ) -> Result<Workspace> {
         if self.enterprise_account_id.is_empty() {
             // Return an error early.
-            bail!("An enterprise account id is required.");
+            return Err(Error::MissingEnterpriseAccountId);
         }
 
         // Build the request.
@@ -754,7 +818,10 @@ impl Airtable {
         match resp.status() {
             StatusCode::OK => (),
             s => {
-                bail!("status code: {}, body: {}", s, resp.text().await?);
+                return Err(Error::ApiError {
+                    status: s,
+                    body: resp.text().await?,
+                });
             }
         }
 
@@ -770,7 +837,7 @@ impl Airtable {
     pub async fn delete_internal_user_by_email(&self, email: &str) -> Result<()> {
         if self.enterprise_account_id.is_empty() {
             // Return an error early.
-            bail!("An enterprise account id is required.");
+            return Err(Error::MissingEnterpriseAccountId);
         }
 
         // Build the request.
@@ -788,14 +855,17 @@ impl Airtable {
         match resp.status() {
             StatusCode::OK => (),
             s => {
-                bail!("status code: {}, body: {}", s, resp.text().await?);
+                return Err(Error::ApiError {
+                    status: s,
+                    body: resp.text().await?,
+                });
             }
         }
 
         // Try to deserialize the response.
         let result: DeleteUserResponse = resp.json().await?;
         if !result.errors.is_empty() {
-            bail!("body: {result:?}");
+            return Err(Error::DeleteUserFailed(result));
         }
 
         Ok(())
@@ -879,7 +949,10 @@ where
                 // Once we hit an error we stop pagination
                 self.offset = None;
 
-                bail!("status code: {}, body: {}", s, response.text().await?);
+                Err(Error::ApiError {
+                    status: s,
+                    body: response.text().await?,
+                })
             }
         }
     }
@@ -949,7 +1022,7 @@ enum UserField {
 const USERFIELDS: &[&str] = &["id", "email", "name"];
 
 impl<'de> Deserialize<'de> for UserField {
-    fn deserialize<D>(deserializer: D) -> Result<UserField, D::Error>
+    fn deserialize<D>(deserializer: D) -> std::result::Result<UserField, D::Error>
     where
         D: Deserializer<'de>,
     {
@@ -962,7 +1035,7 @@ impl<'de> Deserialize<'de> for UserField {
                 formatter.write_str("`id` `email` or `name`")
             }
 
-            fn visit_str<E>(self, value: &str) -> Result<UserField, E>
+            fn visit_str<E>(self, value: &str) -> std::result::Result<UserField, E>
             where
                 E: serde::de::Error,
             {
@@ -988,7 +1061,7 @@ impl<'de> Visitor<'de> for UserVisitor {
         formatter.write_str("struct User")
     }
 
-    fn visit_seq<V>(self, mut seq: V) -> Result<User, V::Error>
+    fn visit_seq<V>(self, mut seq: V) -> std::result::Result<User, V::Error>
     where
         V: SeqAccess<'de>,
     {
@@ -1004,7 +1077,7 @@ impl<'de> Visitor<'de> for UserVisitor {
         Ok(User { id, email, name })
     }
 
-    fn visit_map<V>(self, mut map: V) -> Result<User, V::Error>
+    fn visit_map<V>(self, mut map: V) -> std::result::Result<User, V::Error>
     where
         V: MapAccess<'de>,
     {
@@ -1049,7 +1122,10 @@ impl<'de> Visitor<'de> for UsersVisitor {
         formatter.write_str("a very special vector")
     }
 
-    fn visit_seq<A: SeqAccess<'de>>(self, mut access: A) -> Result<Self::Value, A::Error> {
+    fn visit_seq<A: SeqAccess<'de>>(
+        self,
+        mut access: A,
+    ) -> std::result::Result<Self::Value, A::Error> {
         let mut users: Vec<User> = Default::default();
 
         // While there are entries remaining in the input, add them
@@ -1364,7 +1440,10 @@ impl<'de> Visitor<'de> for AttachmentsVisitor {
         formatter.write_str("a very special vector")
     }
 
-    fn visit_seq<A: SeqAccess<'de>>(self, mut access: A) -> Result<Self::Value, A::Error> {
+    fn visit_seq<A: SeqAccess<'de>>(
+        self,
+        mut access: A,
+    ) -> std::result::Result<Self::Value, A::Error> {
         let mut attachments: Vec<Attachment> = Default::default();
 
         // While there are entries remaining in the input, add them
@@ -1384,12 +1463,12 @@ pub mod user_format_as_array_of_strings {
 
     // The signature of a serialize_with function must follow the pattern:
     //
-    //    fn serialize<S>(&T, S) -> Result<S::Ok, S::Error>
+    //    fn serialize<S>(&T, S) -> std::result::Result<S::Ok, S::Error>
     //    where
     //        S: Serializer
     //
     // although it may also be generic over the input types T.
-    pub fn serialize<S>(array: &[String], serializer: S) -> Result<S::Ok, S::Error>
+    pub fn serialize<S>(array: &[String], serializer: S) -> std::result::Result<S::Ok, S::Error>
     where
         S: Serializer,
     {
@@ -1408,7 +1487,7 @@ pub mod user_format_as_array_of_strings {
 
     // The signature of a deserialize_with function must follow the pattern:
     //
-    //    fn deserialize<'de, D>(D) -> Result<T, D::Error>
+    //    fn deserialize<'de, D>(D) -> std::result::Result<T, D::Error>
     //    where
     //        D: Deserializer<'de>
     //
@@ -1435,12 +1514,12 @@ pub mod user_format_as_string {
 
     // The signature of a serialize_with function must follow the pattern:
     //
-    //    fn serialize<S>(&T, S) -> Result<S::Ok, S::Error>
+    //    fn serialize<S>(&T, S) -> std::result::Result<S::Ok, S::Error>
     //    where
     //        S: Serializer
     //
     // although it may also be generic over the input types T.
-    pub fn serialize<S>(email: &str, serializer: S) -> Result<S::Ok, S::Error>
+    pub fn serialize<S>(email: &str, serializer: S) -> std::result::Result<S::Ok, S::Error>
     where
         S: Serializer,
     {
@@ -1451,12 +1530,12 @@ pub mod user_format_as_string {
 
     // The signature of a deserialize_with function must follow the pattern:
     //
-    //    fn deserialize<'de, D>(D) -> Result<T, D::Error>
+    //    fn deserialize<'de, D>(D) -> std::result::Result<T, D::Error>
     //    where
     //        D: Deserializer<'de>
     //
     // although it may also be generic over the output types T.
-    pub fn deserialize<'de, D>(deserializer: D) -> Result<String, D::Error>
+    pub fn deserialize<'de, D>(deserializer: D) -> std::result::Result<String, D::Error>
     where
         D: Deserializer<'de>,
     {
@@ -1474,12 +1553,12 @@ pub mod attachment_format_as_array_of_strings {
 
     // The signature of a serialize_with function must follow the pattern:
     //
-    //    fn serialize<S>(&T, S) -> Result<S::Ok, S::Error>
+    //    fn serialize<S>(&T, S) -> std::result::Result<S::Ok, S::Error>
     //    where
     //        S: Serializer
     //
     // although it may also be generic over the input types T.
-    pub fn serialize<S>(array: &[String], serializer: S) -> Result<S::Ok, S::Error>
+    pub fn serialize<S>(array: &[String], serializer: S) -> std::result::Result<S::Ok, S::Error>
     where
         S: Serializer,
     {
@@ -1495,7 +1574,7 @@ pub mod attachment_format_as_array_of_strings {
 
     // The signature of a deserialize_with function must follow the pattern:
     //
-    //    fn deserialize<'de, D>(D) -> Result<T, D::Error>
+    //    fn deserialize<'de, D>(D) -> std::result::Result<T, D::Error>
     //    where
     //        D: Deserializer<'de>
     //
@@ -1522,12 +1601,12 @@ pub mod attachment_format_as_string {
 
     // The signature of a serialize_with function must follow the pattern:
     //
-    //    fn serialize<S>(&T, S) -> Result<S::Ok, S::Error>
+    //    fn serialize<S>(&T, S) -> std::result::Result<S::Ok, S::Error>
     //    where
     //        S: Serializer
     //
     // although it may also be generic over the input types T.
-    pub fn serialize<S>(url: &str, serializer: S) -> Result<S::Ok, S::Error>
+    pub fn serialize<S>(url: &str, serializer: S) -> std::result::Result<S::Ok, S::Error>
     where
         S: Serializer,
     {
@@ -1541,12 +1620,12 @@ pub mod attachment_format_as_string {
 
     // The signature of a deserialize_with function must follow the pattern:
     //
-    //    fn deserialize<'de, D>(D) -> Result<T, D::Error>
+    //    fn deserialize<'de, D>(D) -> std::result::Result<T, D::Error>
     //    where
     //        D: Deserializer<'de>
     //
     // although it may also be generic over the output types T.
-    pub fn deserialize<'de, D>(deserializer: D) -> Result<String, D::Error>
+    pub fn deserialize<'de, D>(deserializer: D) -> std::result::Result<String, D::Error>
     where
         D: Deserializer<'de>,
     {
@@ -1577,7 +1656,7 @@ impl<'de> Visitor<'de> for BarcodeVisitor {
         formatter.write_str("struct Barcode")
     }
 
-    fn visit_seq<V>(self, mut seq: V) -> Result<Barcode, V::Error>
+    fn visit_seq<V>(self, mut seq: V) -> std::result::Result<Barcode, V::Error>
     where
         V: SeqAccess<'de>,
     {
@@ -1590,7 +1669,7 @@ impl<'de> Visitor<'de> for BarcodeVisitor {
         Ok(Barcode { text, type_ })
     }
 
-    fn visit_map<V>(self, mut map: V) -> Result<Barcode, V::Error>
+    fn visit_map<V>(self, mut map: V) -> std::result::Result<Barcode, V::Error>
     where
         V: MapAccess<'de>,
     {
@@ -1626,7 +1705,7 @@ enum BarcodeField {
 const BARCODEFIELDS: &[&str] = &["text", "type"];
 
 impl<'de> Deserialize<'de> for BarcodeField {
-    fn deserialize<D>(deserializer: D) -> Result<BarcodeField, D::Error>
+    fn deserialize<D>(deserializer: D) -> std::result::Result<BarcodeField, D::Error>
     where
         D: Deserializer<'de>,
     {
@@ -1639,7 +1718,7 @@ impl<'de> Deserialize<'de> for BarcodeField {
                 formatter.write_str("`text` or `type`")
             }
 
-            fn visit_str<E>(self, value: &str) -> Result<BarcodeField, E>
+            fn visit_str<E>(self, value: &str) -> std::result::Result<BarcodeField, E>
             where
                 E: serde::de::Error,
             {
@@ -1662,12 +1741,12 @@ pub mod barcode_format_as_string {
 
     // The signature of a serialize_with function must follow the pattern:
     //
-    //    fn serialize<S>(&T, S) -> Result<S::Ok, S::Error>
+    //    fn serialize<S>(&T, S) -> std::result::Result<S::Ok, S::Error>
     //    where
     //        S: Serializer
     //
     // although it may also be generic over the input types T.
-    pub fn serialize<S>(text: &str, serializer: S) -> Result<S::Ok, S::Error>
+    pub fn serialize<S>(text: &str, serializer: S) -> std::result::Result<S::Ok, S::Error>
     where
         S: Serializer,
     {
@@ -1680,12 +1759,12 @@ pub mod barcode_format_as_string {
 
     // The signature of a deserialize_with function must follow the pattern:
     //
-    //    fn deserialize<'de, D>(D) -> Result<T, D::Error>
+    //    fn deserialize<'de, D>(D) -> std::result::Result<T, D::Error>
     //    where
     //        D: Deserializer<'de>
     //
     // although it may also be generic over the output types T.
-    pub fn deserialize<'de, D>(deserializer: D) -> Result<String, D::Error>
+    pub fn deserialize<'de, D>(deserializer: D) -> std::result::Result<String, D::Error>
     where
         D: Deserializer<'de>,
     {
@@ -1701,12 +1780,12 @@ pub mod deserialize_null_string {
 
     // The signature of a deserialize_with function must follow the pattern:
     //
-    //    fn deserialize<'de, D>(D) -> Result<T, D::Error>
+    //    fn deserialize<'de, D>(D) -> std::result::Result<T, D::Error>
     //    where
     //        D: Deserializer<'de>
     //
     // although it may also be generic over the output types T.
-    pub fn deserialize<'de, D>(deserializer: D) -> Result<String, D::Error>
+    pub fn deserialize<'de, D>(deserializer: D) -> std::result::Result<String, D::Error>
     where
         D: Deserializer<'de>,
     {
@@ -1724,7 +1803,7 @@ pub mod deserialize_missing_timezone {
 
     // The signature of a deserialize_with function must follow the pattern:
     //
-    //    fn deserialize<'de, D>(D) -> Result<T, D::Error>
+    //    fn deserialize<'de, D>(D) -> std::result::Result<T, D::Error>
     //    where
     //        D: Deserializer<'de>
     //

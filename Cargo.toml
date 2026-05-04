@@ -9,7 +9,8 @@ repository = "https://github.com/oxidecomputer/cio"
 documentation = "https://docs.rs/airtable-api"
 
 [dependencies]
-anyhow = "1"
+thiserror = "2"
+url = "2"
 chrono = { version = "0.4", features = ["serde"] }
 log = { version = "0.4" }
 reqwest = { version = "0.11", default-features = false, features = ["json", "rustls-tls"] }
