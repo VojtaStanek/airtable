@@ -11,7 +11,7 @@
  *
  * async fn get_records() {
  *     // Initialize the Airtable client.
- *     let airtable = Airtable::new_from_env();
+ *     let airtable = Airtable::new_without_enterprise_id("API_KEY", "BASE_ID");
  *
  *     // Get the current records from a table.
  *     let mut records: Vec<Record<SomeFormat>> = airtable
@@ -80,12 +80,26 @@ pub type Result<T> = std::result::Result<T, Error>;
 /// Endpoint for the Airtable API.
 const ENDPOINT: &str = "https://api.airtable.com/v0/";
 
+trait _Private {}
+#[expect(private_bounds)]
+pub trait HasEnterpriseIdMarker: Clone + _Private {}
+#[derive(Debug, Clone)]
+pub struct DoesNotHaveEnterpriseId;
+impl _Private for DoesNotHaveEnterpriseId {}
+impl HasEnterpriseIdMarker for DoesNotHaveEnterpriseId {}
+#[derive(Debug, Clone)]
+pub struct HasEnterpriseId {
+    enterprise_account_id: String,
+}
+impl _Private for HasEnterpriseId {}
+impl HasEnterpriseIdMarker for HasEnterpriseId {}
+
 /// Entrypoint for interacting with the Airtable API.
 #[derive(Clone)]
-pub struct Airtable {
+pub struct Airtable<HEIM: HasEnterpriseIdMarker = DoesNotHaveEnterpriseId> {
     key: String,
     base_id: String,
-    enterprise_account_id: String,
+    enterprise_account_id: HEIM,
 
     pub(crate) client: reqwest_middleware::ClientWithMiddleware,
 }
@@ -96,17 +110,26 @@ pub fn api_key_from_env() -> String {
     env::var("AIRTABLE_API_KEY").unwrap_or_default()
 }
 
-impl Airtable {
+impl Airtable<DoesNotHaveEnterpriseId> {
+    pub fn new_without_enterprise_id<K, B>(key: K, base_id: B) -> Self
+    where
+        K: ToString,
+        B: ToString,
+    {
+        Airtable::new(key, base_id, DoesNotHaveEnterpriseId)
+    }
+}
+
+impl<HEIM: HasEnterpriseIdMarker> Airtable<HEIM> {
     /// Create a new Airtable client struct. It takes a type that can convert into
     /// an &str (`String` or `Vec<u8>` for example). As long as the function is
     /// given a valid API Key and Base ID your requests will work.
     /// You can leave the Enterprise Account ID empty if you are not using the
     /// Enterprise API features.
-    pub fn new<K, B, E>(key: K, base_id: B, enterprise_account_id: E) -> Self
+    pub fn new<K, B>(key: K, base_id: B, enterprise_account_id: HEIM) -> Self
     where
         K: ToString,
         B: ToString,
-        E: ToString,
     {
         let http = reqwest::Client::builder().build();
         match http {
@@ -125,7 +148,7 @@ impl Airtable {
                 Self {
                     key: key.to_string(),
                     base_id: base_id.to_string(),
-                    enterprise_account_id: enterprise_account_id.to_string(),
+                    enterprise_account_id,
 
                     client,
                 }
@@ -134,16 +157,22 @@ impl Airtable {
         }
     }
 
-    /// Create a new Airtable client struct from environment variables. It
-    /// takes a type that can convert into
-    /// an &str (`String` or `Vec<u8>` for example). As long as the function is
-    /// given a valid API Key and Base ID your requests will work.
-    #[must_use]
-    pub fn new_from_env() -> Self {
-        let base_id = env::var("AIRTABLE_BASE_ID").unwrap_or_default();
-        let enterprise_account_id = env::var("AIRTABLE_ENTERPRISE_ACCOUNT_ID").unwrap_or_default();
-
-        Airtable::new(api_key_from_env(), base_id, enterprise_account_id)
+    pub fn new_with_enterprise_id<K, B>(
+        key: K,
+        base_id: B,
+        enterprise_account_id: String,
+    ) -> Airtable<HasEnterpriseId>
+    where
+        K: ToString,
+        B: ToString,
+    {
+        Airtable::new(
+            key,
+            base_id,
+            HasEnterpriseId {
+                enterprise_account_id,
+            },
+        )
     }
 
     /// Get the currently set API key.
@@ -356,7 +385,7 @@ impl Airtable {
         table: &str,
         view: &str,
         fields: Vec<&str>,
-    ) -> Pages<'_, T> {
+    ) -> Pages<'_, T, HEIM> {
         Pages::new(self, table, view, &fields)
     }
 
@@ -652,22 +681,19 @@ impl Airtable {
             }
         }
     }
+}
 
+impl Airtable<HasEnterpriseId> {
     /// List users.
     /// This is for an enterprise admin to do only.
     /// FROM: <https://airtable.com/api/enterprise>
     pub async fn list_users(&self) -> Result<Vec<User>> {
-        if self.enterprise_account_id.is_empty() {
-            // Return an error early.
-            return Err(Error::MissingEnterpriseAccountId);
-        }
-
         // Build the request.
         let request = self.request(
             Method::GET,
             format!(
                 "v0/meta/enterpriseAccounts/{}/users",
-                self.enterprise_account_id
+                self.enterprise_account_id.enterprise_account_id,
             ),
             (),
             Some(vec![("state", "provisioned".to_string())]),
@@ -695,17 +721,12 @@ impl Airtable {
     /// FROM: <https://airtable.com/api/enterprise#enterpriseAccountUserGetInformationByEmail>
     /// Permission level can be: owner | create | edit | comment | read
     pub async fn get_enterprise_user(&self, email: &str) -> Result<EnterpriseUser> {
-        if self.enterprise_account_id.is_empty() {
-            // Return an error early.
-            return Err(Error::MissingEnterpriseAccountId);
-        }
-
         // Build the request.
         let request = self.request(
             Method::GET,
             format!(
                 "v0/meta/enterpriseAccounts/{}/users",
-                self.enterprise_account_id
+                self.enterprise_account_id.enterprise_account_id,
             ),
             (),
             Some(vec![
@@ -745,11 +766,6 @@ impl Airtable {
         user_id: &str,
         permission_level: &str,
     ) -> Result<()> {
-        if self.enterprise_account_id.is_empty() {
-            // Return an error early.
-            return Err(Error::MissingEnterpriseAccountId);
-        }
-
         // Build the request.
         let request = self.request(
             Method::POST,
@@ -789,11 +805,6 @@ impl Airtable {
         workspace_id: &str,
         includes: Option<[WorkspaceIncludes; N]>,
     ) -> Result<Workspace> {
-        if self.enterprise_account_id.is_empty() {
-            // Return an error early.
-            return Err(Error::MissingEnterpriseAccountId);
-        }
-
         // Build the request.
         let request = self.request(
             Method::GET,
@@ -835,17 +846,12 @@ impl Airtable {
     /// The user must be an internal user, meaning they have an email with the company domain.
     /// FROM: <https://airtable.com/api/enterprise#enterpriseAccountUserDeleteUserByEmail>
     pub async fn delete_internal_user_by_email(&self, email: &str) -> Result<()> {
-        if self.enterprise_account_id.is_empty() {
-            // Return an error early.
-            return Err(Error::MissingEnterpriseAccountId);
-        }
-
         // Build the request.
         let request = self.request(
             Method::DELETE,
             format!(
                 "v0/meta/enterpriseAccounts/{}/users",
-                self.enterprise_account_id
+                self.enterprise_account_id.enterprise_account_id,
             ),
             (),
             Some(vec![("email", email.to_string())]),
@@ -872,8 +878,8 @@ impl Airtable {
     }
 }
 
-pub struct Pages<'a, T> {
-    client: &'a Airtable,
+pub struct Pages<'a, T, HEIM: HasEnterpriseIdMarker = DoesNotHaveEnterpriseId> {
+    client: &'a Airtable<HEIM>,
     table: String,
     view: String,
     fields: Vec<String>,
@@ -881,12 +887,13 @@ pub struct Pages<'a, T> {
     record_type: PhantomData<T>,
 }
 
-impl<'a, T> Pages<'a, T>
+impl<'a, T, HEIM> Pages<'a, T, HEIM>
 where
     T: DeserializeOwned,
+    HEIM: HasEnterpriseIdMarker,
 {
     #[must_use]
-    pub fn new(client: &'a Airtable, table: &str, view: &str, fields: &[&str]) -> Self {
+    pub fn new(client: &'a Airtable<HEIM>, table: &str, view: &str, fields: &[&str]) -> Self {
         Self {
             client,
             table: table.to_string(),
