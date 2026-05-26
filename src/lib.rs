@@ -315,7 +315,7 @@ impl<HEIM: HasEnterpriseIdMarker> Airtable<HEIM> {
         tracing::debug!(params = ?params, "Built request parameters for list_records_build");
 
         // Build the request.
-        let mut request = self.request(
+        let request = self.request(
             Method::GET,
             builder.table_name.to_string(),
             (),
@@ -334,7 +334,7 @@ impl<HEIM: HasEnterpriseIdMarker> Airtable<HEIM> {
         }
 
         // Try to deserialize the response.
-        let mut r: APICall<T> = resp.json().await?;
+        let r: APICall<T> = resp.json().await?;
 
         let mut records = r.records;
 
@@ -343,7 +343,7 @@ impl<HEIM: HasEnterpriseIdMarker> Airtable<HEIM> {
         // Paginate if we should.
         // TODO: make this more DRY
         while !offset.is_empty() {
-            request = self.request(
+            let request = self.request(
                 Method::GET,
                 builder.table_name.to_string(),
                 (),
@@ -369,7 +369,7 @@ impl<HEIM: HasEnterpriseIdMarker> Airtable<HEIM> {
             }
 
             // Try to deserialize the response.
-            r = resp.json().await?;
+            let mut r: APICall<T> = resp.json().await?;
 
             records.append(&mut r.records);
 
