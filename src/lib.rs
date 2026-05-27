@@ -49,8 +49,10 @@ use thiserror::Error;
 
 pub mod formulas;
 mod list_builder;
+mod macros;
 
-pub use list_builder::ListRecords;
+pub use list_builder::{ListQueryParams, ListRecords};
+pub use macros::{AirtableTable, QueriedRecord, RecordParsingError};
 
 /// Errors returned by the Airtable client.
 #[derive(Debug, Error)]
@@ -73,6 +75,11 @@ pub enum Error {
     DeleteUserFailed(DeleteUserResponse),
     #[error("invalid formula value: {0}")]
     InvalidFormulaValue(String),
+    #[error("failed to parse record: {source:?}, record: {record:?}")]
+    ParseResponseFailed {
+        source: RecordParsingError,
+        record: Record<serde_json::Value>,
+    },
 }
 
 pub type Result<T> = std::result::Result<T, Error>;
@@ -292,6 +299,34 @@ impl<HEIM: HasEnterpriseIdMarker> Airtable<HEIM> {
         Ok(records)
     }
 
+    pub async fn list_querieable_records<T: macros::QueriedRecord>(
+        &self,
+        builder: &list_builder::ListQueryParams,
+    ) -> Result<Vec<T>> {
+        let records = self
+            .list_records_build::<serde_json::Value>(&list_builder::ListRecords {
+                table_name: T::Table::TABLE_NAME.to_string(),
+                view_name: None,
+                max_records: builder.max_records,
+                fields: T::queried_fields(),
+                filter_formula: builder.filter_formula.clone(),
+            })
+            .await?;
+        let mut res = Vec::with_capacity(records.len());
+        for record in records {
+            match T::from_record(&record) {
+                Ok(r) => res.push(r),
+                Err(e) => {
+                    return Err(Error::ParseResponseFailed {
+                        source: e,
+                        record: record.clone(),
+                    });
+                }
+            }
+        }
+        Ok(res)
+    }
+
     /// List records in a table for a particular view.
     pub async fn list_records_build<T: DeserializeOwned>(
         &self,
@@ -415,6 +450,22 @@ impl<HEIM: HasEnterpriseIdMarker> Airtable<HEIM> {
         Ok(record)
     }
 
+    pub async fn get_querieable_record<T: macros::QueriedRecord>(
+        &self,
+        record_id: &str,
+    ) -> Result<T> {
+        let record = self
+            .get_record::<serde_json::Value>(T::Table::TABLE_NAME, record_id)
+            .await?;
+        match T::from_record(&record) {
+            Ok(r) => Ok(r),
+            Err(e) => Err(Error::ParseResponseFailed {
+                source: e,
+                record: record.clone(),
+            }),
+        }
+    }
+
     /// Delete record from a table.
     pub async fn delete_record(&self, table: &str, record_id: &str) -> Result<()> {
         // Build the request.
@@ -480,11 +531,11 @@ impl<HEIM: HasEnterpriseIdMarker> Airtable<HEIM> {
     /// The Airtable API limits record creation requests to 10 records per request. Because of
     /// this, calls to this function containing more than 10 records will send multiple requests
     /// (one request for each chunk of 10 records) to the Airtable API.
-    pub async fn create_records<T: Serialize + DeserializeOwned>(
+    pub async fn create_records<In: Serialize + DeserializeOwned>(
         &self,
         table: &str,
-        records: Vec<Record<T>>,
-    ) -> Result<Vec<Record<T>>> {
+        records: Vec<Record<In>>,
+    ) -> Result<Vec<Record<In>>> {
         if records.len() <= 10 {
             self.create_records_inner(table, records).await
         } else {
@@ -500,14 +551,48 @@ impl<HEIM: HasEnterpriseIdMarker> Airtable<HEIM> {
         }
     }
 
+    pub async fn create_querieable_records<In: Serialize, Out: macros::QueriedRecord>(
+        &self,
+        records: Vec<Record<In>>,
+    ) -> Result<Vec<Out>> {
+        let table = Out::Table::TABLE_NAME;
+        let created_records = if records.len() <= 10 {
+            self.create_records_inner(table, records).await?
+        } else {
+            let mut res = Vec::new();
+
+            let mut records = records.into_iter();
+            while records.len() > 0 {
+                let chunk = (&mut records).take(10).collect();
+                res.extend(self.create_records_inner(table, chunk).await?);
+            }
+
+            res
+        };
+
+        let mut res = Vec::with_capacity(created_records.len());
+        for record in created_records {
+            match Out::from_record(&record) {
+                Ok(r) => res.push(r),
+                Err(e) => {
+                    return Err(Error::ParseResponseFailed {
+                        source: e,
+                        record: record.clone(),
+                    });
+                }
+            }
+        }
+        Ok(res)
+    }
+
     /// Bulk create records in a table.
     ///
     /// The provided `records` vector MUST contain at most 10 items, or this function will panic.
-    async fn create_records_inner<T: Serialize + DeserializeOwned>(
+    async fn create_records_inner<In: Serialize, Out: DeserializeOwned>(
         &self,
         table: &str,
-        records: Vec<Record<T>>,
-    ) -> Result<Vec<Record<T>>> {
+        records: Vec<Record<In>>,
+    ) -> Result<Vec<Record<Out>>> {
         assert!(records.len() <= 10);
 
         // Build the request.
@@ -535,7 +620,7 @@ impl<HEIM: HasEnterpriseIdMarker> Airtable<HEIM> {
         }
 
         // Try to deserialize the response.
-        let r: APICall<T> = resp.json().await?;
+        let r: APICall<Out> = resp.json().await?;
 
         Ok(r.records)
     }
@@ -565,14 +650,44 @@ impl<HEIM: HasEnterpriseIdMarker> Airtable<HEIM> {
         }
     }
 
+    pub async fn update_querieable_records<In: Serialize, Out: macros::QueriedRecord>(
+        &self,
+        records: Vec<Record<In>>,
+    ) -> Result<Vec<Out>> {
+        let table = Out::Table::TABLE_NAME;
+        let updated_records = if records.len() <= 10 {
+            self.update_records_inner(table, records).await?
+        } else {
+            let mut res = Vec::new();
+
+            let mut records = records.into_iter();
+            while records.len() > 0 {
+                let chunk = (&mut records).take(10).collect();
+                res.extend(self.update_records_inner(table, chunk).await?);
+            }
+
+            res
+        };
+
+        updated_records
+            .into_iter()
+            .map(|record| {
+                Out::from_record(&record).map_err(|e| Error::ParseResponseFailed {
+                    source: e,
+                    record: record.clone(),
+                })
+            })
+            .collect::<std::result::Result<Vec<Out>, Error>>()
+    }
+
     /// Bulk update records in a table.
     ///
     /// The provided `records` vector MUST contain at most 10 items, or this function will panic.
-    async fn update_records_inner<T: Serialize + DeserializeOwned>(
+    async fn update_records_inner<In: Serialize, Out: DeserializeOwned>(
         &self,
         table: &str,
-        records: Vec<Record<T>>,
-    ) -> Result<Vec<Record<T>>> {
+        records: Vec<Record<In>>,
+    ) -> Result<Vec<Record<Out>>> {
         assert!(records.len() <= 10);
 
         // Build the request.
@@ -600,7 +715,7 @@ impl<HEIM: HasEnterpriseIdMarker> Airtable<HEIM> {
         }
 
         // Try to deserialize the response.
-        match resp.json::<APICall<T>>().await {
+        match resp.json::<APICall<Out>>().await {
             Ok(v) => Ok(v.records),
             Err(_) => {
                 // This might fail. On a faiture just return an empty vector.

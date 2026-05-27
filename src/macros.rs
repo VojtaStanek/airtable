@@ -1,0 +1,306 @@
+use crate::Record;
+
+pub trait AirtableTable {
+    const TABLE_NAME: &'static str;
+}
+
+#[macro_export]
+macro_rules! airtable_table {
+    ($vis:vis $struct_name:ident(table: $table_name:literal)) => {
+        $vis struct $struct_name;
+
+        impl $crate::AirtableTable for $struct_name {
+            const TABLE_NAME: &'static str = $table_name;
+        }
+    };
+}
+
+pub trait QueriedRecord {
+    type Table: AirtableTable;
+
+    fn queried_fields() -> Vec<&'static str>;
+    fn from_record(
+        record: &Record<serde_json::Value>,
+    ) -> std::result::Result<Self, RecordParsingError>
+    where
+        Self: std::marker::Sized;
+}
+
+#[derive(Debug, thiserror::Error)]
+pub enum RecordParsingError {
+    #[error("Invalid field: {field_name} - {source}")]
+    InvalidField {
+        field_name: &'static str,
+        source: serde_json::Error,
+    },
+    #[error("Missing field: {field_name}")]
+    MissingField { field_name: &'static str },
+}
+
+#[macro_export]
+macro_rules! airtable_queried_record {
+    (
+        $( #[$struct_attr:meta] )*
+        $vis:vis $struct_name:ident(table: $table:ty) {
+            $(
+                $field_vis:vis $field_name:ident : $field_source:tt $field_type:ty $([default=$default_expr:expr])?
+                $(=> |$field_var:ident| $field_transform:expr)?
+            ),*
+            $(,)?
+        }
+    ) => {
+        $( #[$struct_attr] )*
+        $vis struct $struct_name {
+            $(
+                $field_vis $field_name: $field_type
+            ),*
+        }
+
+        impl $crate::QueriedRecord for $struct_name {
+            type Table = $table;
+
+            fn queried_fields() -> Vec<&'static str> {
+                const fn str_eq(a: &str, b: &str) -> bool {
+                    let (a, b) = (a.as_bytes(), b.as_bytes());
+                    if a.len() != b.len() { return false; }
+                    let mut i = 0;
+                    while i < a.len() {
+                        if a[i] != b[i] { return false; }
+                        i += 1;
+                    }
+                    true
+                }
+
+                /// Returns the deduplicated strings in a fixed-size array, plus the true length.
+                /// The "tail" of the array beyond `len` is garbage ("").
+                pub const fn const_dedup<const N: usize>(
+                    input: &[&'static str],
+                ) -> ([&'static str; N], usize) {
+                    let mut out = [""; N];
+                    let mut len = 0usize;
+                    let mut i = 0;
+                    while i < N {
+                        let mut unique = true;
+                        let mut j = 0;
+                        while j < len {
+                            if str_eq(out[j], input[i]) {
+                                unique = false;
+                                break;
+                            }
+                            j += 1;
+                        }
+                        if unique {
+                            out[len] = input[i];
+                            len += 1;
+                        }
+                        i += 1;
+                    }
+                    (out, len)
+                }
+
+                const FIELD_NAMES: &[&'static str] = &$crate::airtable_queried_record!(@field_names $($field_source),*);
+                const N: usize = FIELD_NAMES.len();
+                const DATA: ([&'static str; N], usize) = const_dedup(FIELD_NAMES);
+                DATA.0[..DATA.1].to_vec()
+            }
+
+            fn from_record(
+                #[allow(unused_variables)] // when there are no fields
+                record: &$crate::Record<::serde_json::Value>,
+            ) -> ::std::result::Result<Self, $crate::RecordParsingError> {
+                Ok(Self {
+                    $(
+                        $field_name: $crate::airtable_queried_record!(@build_record record, $field_source, $field_name, $field_type $(, transform=|$field_var| $field_transform)? $(, default=$default_expr)?)?,
+                    )*
+                })
+            }
+        }
+    };
+    (@field_source_name ID) => { "ID" };
+    (@field_source_name $field_source:literal) => { $field_source };
+    (@field_names $($item:tt),*) => {
+        $crate::airtable_queried_record!(@field_names_inner [$($item)*] -> [])
+    };
+    (@field_names_inner [ID $($rest:tt)*] -> [$($body:tt)*]) => {
+        $crate::airtable_queried_record!(@field_names_inner [$($rest)*] -> [$($body)*])
+    };
+    (@field_names_inner [$field_source:literal $($rest:tt)*] -> [$($body:tt)*]) => {
+        $crate::airtable_queried_record!(@field_names_inner [$($rest)*] -> [$($body)* $field_source])
+    };
+    (@field_names_inner [] -> [$($body:tt)*]) => {
+        [$($body),*]
+    };
+    (@get_field_value $record:ident, ID) => {
+        const {
+            panic!("ID field is not supported at this place");
+            #[expect(unreachable_code)]
+            Ok(&serde_json::Value::Null)
+        }
+    };
+    (@get_field_value $record:ident, $field_source:literal) => {
+        $record.fields.get($crate::airtable_queried_record!(@field_source_name $field_source))
+            // .ok_or_else(|| $crate::RecordParsingError::MissingField { field_name: $crate::airtable_queried_record!(@field_source_name $field_source) })
+            .unwrap_or(&serde_json::Value::Null) // treat missing field as null, parsing will fail with InvalidField instead of MissingField
+    };
+    (@build_record $record:ident, ID, $field_var:ident, $field_type:ty) => {
+        {
+            ::std::result::Result::Ok($record.id.clone())
+        }
+    };
+    (@get_default $field_source:tt $default_expr:expr) => {
+        ::std::result::Result::Ok($default_expr)
+    };
+    (@get_default $field_source:tt) => {
+        ::std::result::Result::Err($crate::RecordParsingError::MissingField {
+            field_name: $crate::airtable_queried_record!(@field_source_name $field_source),
+        })
+    };
+    (@parse_field $raw:ident $field_source:tt $field_type:ty | $transform_var:ident | $transform_block:expr) => {
+        {
+            let $transform_var: &::serde_json::Value = $raw;
+            Ok({ $transform_block })
+        }
+    };
+    (@parse_field $raw:ident $field_source:tt $field_type:ty) => {
+        ::serde_json::from_value::<$field_type>($raw.clone())
+            .map_err(|e| $crate::RecordParsingError::InvalidField {
+                field_name: $crate::airtable_queried_record!(@field_source_name $field_source),
+                source: e
+            })
+    };
+    (@build_record $record:ident, $field_source:tt, $field_var:ident, $field_type:ty $(, transform=|$transform_var:ident| $transform_block:expr)? $(, default=$default_expr:expr)? ) => {
+        {
+            let raw: &::serde_json::Value = $crate::airtable_queried_record!(@get_field_value $record, $field_source);
+            if raw.is_null() {
+                $crate::airtable_queried_record!(@get_default $field_source $( $default_expr )?)
+            } else {
+                $crate::airtable_queried_record!(@parse_field raw $field_source $field_type $(|$transform_var| $transform_block)?)
+            }
+        }
+    };
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test() {
+        airtable_table!(
+            pub SomeTable(table: "tblTable1")
+        );
+
+        airtable_queried_record! {
+            SomeRecord(table: SomeTable) {
+                name: "Jméno" String,
+                surname: "Příjmení" String,
+                pub foobar: "Foobar" (String, String) => |s| {
+                    let mut parts = s.as_str().expect("should be str").splitn(2, '-');
+                    let a = parts.next().unwrap_or_default().trim().to_string();
+                    let b = parts.next().unwrap_or_default().trim().to_string();
+                    (a, b)
+                },
+                half_foobar: "Foobar" String => |s| {
+                    let s = s.as_str().expect("should be str");
+                    s.split('-').next().unwrap_or_default().trim().to_string()
+                },
+                name_length: "Jméno" usize => |s| s.as_str().expect("should be str").len(),
+            }
+        }
+
+        assert_eq!(
+            <SomeRecord as super::QueriedRecord>::Table::TABLE_NAME,
+            "tblTable1"
+        );
+        assert_eq!(
+            SomeRecord::queried_fields(),
+            vec!["Jméno", "Příjmení", "Foobar"]
+        );
+
+        let record = Record {
+            id: "rec123".to_string(),
+            fields: serde_json::json!({
+                "Jméno": "John",
+                "Příjmení": "Doe",
+                "Foobar": "foo - bar"
+            }),
+            created_time: None,
+        };
+
+        let parsed = SomeRecord::from_record(&record).unwrap();
+        assert_eq!(parsed.name, "John");
+        assert_eq!(parsed.surname, "Doe");
+        assert_eq!(parsed.foobar, ("foo".to_string(), "bar".to_string()));
+        assert_eq!(parsed.half_foobar, "foo".to_string());
+        assert_eq!(parsed.name_length, 4);
+    }
+
+    #[test]
+    fn test_id() {
+        airtable_table!(
+            pub SomeTable(table: "tblTable1")
+        );
+
+        airtable_queried_record! {
+            SomeRecord(table: SomeTable) {
+                id: ID String,
+            }
+        }
+
+        assert_eq!(
+            <SomeRecord as super::QueriedRecord>::Table::TABLE_NAME,
+            "tblTable1"
+        );
+        assert!(SomeRecord::queried_fields().is_empty());
+
+        let record = Record {
+            id: "rec123".to_string(),
+            fields: serde_json::json!({}),
+            created_time: None,
+        };
+
+        let parsed = SomeRecord::from_record(&record).unwrap();
+        assert_eq!(parsed.id, "rec123");
+    }
+
+    #[test]
+    fn test_optional_field() {
+        airtable_table!(
+            pub SomeTable(table: "tblTable1")
+        );
+
+        airtable_queried_record! {
+            #[derive(Debug)]
+            SomeRecord(table: SomeTable) {
+                must_have: "must_have" Option<String>,
+                optional: "optional" Option<String> [default=None],
+            }
+        }
+
+        let record = Record {
+            id: "rec123".to_string(),
+            fields: serde_json::json!({
+                "must_have": "I am here",
+            }),
+            created_time: None,
+        };
+
+        let parsed = SomeRecord::from_record(&record).unwrap();
+        assert_eq!(parsed.must_have, Some("I am here".to_string()));
+        assert_eq!(parsed.optional, None);
+
+        let invalid_record = Record {
+            id: "rec123".to_string(),
+            fields: serde_json::json!({}),
+            created_time: None,
+        };
+
+        let error = SomeRecord::from_record(&invalid_record).unwrap_err();
+        assert!(matches!(
+            error,
+            RecordParsingError::MissingField {
+                field_name: "must_have"
+            }
+        ));
+    }
+}
