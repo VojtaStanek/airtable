@@ -68,13 +68,21 @@ impl Function {
 
 #[derive(Clone, Debug)]
 pub enum Expression {
+    /// Infix operator, e.g. `{Status} = "Active"` would be represented as `Infix(Equal, FieldReference("Status"), TextLiteral("Active"))`
     Infix(Operator, Box<Expression>, Box<Expression>),
+    /// Text literal, e.g. `"Active"`
     TextLiteral(String),
+    /// Number literal, e.g. `42`
     NumberLiteral(i64),
+    /// Field reference, e.g. `{Status}`
     FieldReference(String),
+    /// Function call, e.g. `RECORD_ID()`, `AND(...)`, `FIND(...)`
     FunctionCall(Function),
 }
 
+/// These are characters which are safe to use in Airtable formulas, either as field names or text literals.
+///
+/// This is not an exhaustive list of all characters allowed by Airtable, but it covers all characters we actually use in our field names and values.
 const ALLOWED_CHARS: [char; 99] = [
     'A', 'Á', 'B', 'C', 'Č', 'D', 'Ď', 'E', 'É', 'Ě', 'F', 'G', 'H', 'I', 'Í', 'J', 'K', 'L', 'M',
     'N', 'Ň', 'O', 'Ó', 'P', 'Q', 'R', 'Ř', 'S', 'Š', 'T', 'Ť', 'U', 'Ú', 'Ů', 'V', 'W', 'X', 'Y',
@@ -85,6 +93,17 @@ const ALLOWED_CHARS: [char; 99] = [
 ];
 
 impl Expression {
+    /// Returns a string representation of this expression that can be used as an Airtable formula.
+    ///
+    /// ```rust
+    /// use airtable::formulas::{Expression, Function, Operator};
+    /// let formula = Expression::Infix(
+    ///     Operator::Equal,
+    ///     Box::new(Expression::FieldReference("Status".to_string())),
+    ///     Box::new(Expression::TextLiteral("Active".to_string())),
+    /// ).to_formula().unwrap();
+    /// assert_eq!(formula, "({Status} = \"Active\")");
+    /// ```
     pub fn to_formula(&self) -> crate::Result<String> {
         match self {
             Expression::Infix(op, left, right) => Ok(format!(
