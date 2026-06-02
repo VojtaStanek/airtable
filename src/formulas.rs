@@ -25,6 +25,31 @@ impl Operator {
 pub enum Function {
     RecordId,
     And(Vec<Expression>),
+    /// Logical OR of multiple expressions.
+    ///
+    /// ```rust
+    /// use airtable::formulas::{Expression, Function, Operator};
+    ///
+    /// assert_eq!(
+    ///     Expression::FunctionCall(Function::Or(vec![])).to_formula().unwrap(),
+    ///     "FALSE()"
+    /// );
+    ///
+    /// assert_eq!(
+    ///     Expression::FunctionCall(Function::Or(vec![
+    ///         Expression::Infix(Operator::Equal, Box::new(Expression::FieldReference("Status".to_string())), Box::new(Expression::TextLiteral("Pending".to_string()))),
+    ///     ])).to_formula().unwrap(),
+    ///     "OR(({Status} = \"Pending\"))"
+    /// );
+    ///
+    /// assert_eq!(
+    ///     Expression::FunctionCall(Function::Or(vec![
+    ///         Expression::Infix(Operator::Equal, Box::new(Expression::FieldReference("Status".to_string())), Box::new(Expression::TextLiteral("Active".to_string()))),
+    ///         Expression::Infix(Operator::Equal, Box::new(Expression::FieldReference("Status".to_string())), Box::new(Expression::TextLiteral("Pending".to_string()))),
+    ///     ])).to_formula().unwrap(),
+    ///     "OR(({Status} = \"Active\"), ({Status} = \"Pending\"))"
+    /// );
+    /// ```
     Or(Vec<Expression>),
     Find(Box<Expression>, Box<Expression>),
     ArrayJoin(Box<Expression>),
