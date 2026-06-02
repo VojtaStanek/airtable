@@ -37,6 +37,34 @@ pub enum RecordParsingError {
     MissingField { field_name: &'static str },
 }
 
+/// Helper macro to define a struct representing a queried Airtable record, along with the implementation of `QueriedRecord`.
+/// 
+/// `field: "Airtable Field" Type [default=expr] => |v| transform`
+///  
+/// `v` is the field's raw `&serde_json::Value` (i.e. `record.fields.get("Airtable Field")`).
+/// If the field is null/missing, [default=...] is used and the transform is skipped;
+/// otherwise the transform runs. So transforms only see non-null values.
+/// 
+/// 
+/// `id: ID String` pulls record.id and is excluded from the fetched field list.
+/// 
+/// Example
+/// ```rust
+/// use airtable::{airtable_table, airtable_queried_record};
+/// 
+/// airtable_table!(
+///    pub MyTable(table: "tbl123")
+/// );
+/// 
+/// airtable_queried_record! {
+///     pub MyRecord(table: MyTable) {
+///         name: "Name" String,
+///         optional: "Optional" Option<String> [default=None],
+///         transformed: "Transformed" String => |v| v.as_str().unwrap().to_uppercase(),
+///         id: ID String,
+///     }
+/// }
+/// ```
 #[macro_export]
 macro_rules! airtable_queried_record {
     (
