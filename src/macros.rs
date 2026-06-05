@@ -26,6 +26,59 @@ pub trait QueriedRecord {
         Self: std::marker::Sized;
 }
 
+pub mod filters {
+    use super::*;
+
+    pub trait TableFilter {
+        type Table: AirtableTable;
+
+        fn filter_formula(&self) -> crate::formulas::Expression;
+    }
+
+    pub struct AndFilter<T>(pub T);
+    pub struct OrFilter<T>(pub T);
+
+    macro_rules! impl_tuple_filter {
+        ($($name:ident)+) => {
+            impl<T: TableFilter, $($name: TableFilter<Table = T::Table>,)+> TableFilter for AndFilter<(T, $($name,)+)> {
+                type Table = T::Table;
+
+                fn filter_formula(&self) -> crate::formulas::Expression {
+                    #[allow(non_snake_case)]
+                    let (t, $($name,)+) = &self.0;
+                    crate::formulas::Expression::FunctionCall(crate::formulas::Function::And(vec![
+                        t.filter_formula(),
+                        $($name.filter_formula(),)+
+                    ]))
+                }
+            }
+
+            impl<T: TableFilter, $($name: TableFilter<Table = T::Table>,)+> TableFilter for OrFilter<(T, $($name,)+)> {
+                type Table = T::Table;
+
+                fn filter_formula(&self) -> crate::formulas::Expression {
+                    #[allow(non_snake_case)]
+                    let (t, $($name,)+) = &self.0;
+                    crate::formulas::Expression::FunctionCall(crate::formulas::Function::Or(vec![
+                        t.filter_formula(),
+                        $($name.filter_formula(),)+
+                    ]))
+                }
+            }
+        };
+    }
+
+    impl_tuple_filter!(A);
+    impl_tuple_filter!(A B);
+    impl_tuple_filter!(A B C);
+    impl_tuple_filter!(A B C D);
+    impl_tuple_filter!(A B C D E);
+    impl_tuple_filter!(A B C D E F);
+    impl_tuple_filter!(A B C D E F G);
+    impl_tuple_filter!(A B C D E F G H);
+    impl_tuple_filter!(A B C D E F G H I);
+}
+
 #[derive(Debug, thiserror::Error)]
 pub enum RecordParsingError {
     #[error("Invalid field: {field_name} - {source}")]
