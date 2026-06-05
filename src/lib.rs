@@ -51,7 +51,7 @@ pub mod formulas;
 mod list_builder;
 mod macros;
 
-pub use list_builder::{ListQueryParams, ListRecords};
+pub use list_builder::ListRecords;
 pub use macros::*;
 
 /// Errors returned by the Airtable client.
@@ -297,34 +297,6 @@ impl<HEIM: HasEnterpriseIdMarker> Airtable<HEIM> {
         }
 
         Ok(records)
-    }
-
-    pub async fn list_querieable_records<T: macros::QueriedRecord>(
-        &self,
-        builder: &list_builder::ListQueryParams,
-    ) -> Result<Vec<T>> {
-        let records = self
-            .list_records_build::<serde_json::Value>(&list_builder::ListRecords {
-                table_name: T::Table::TABLE_NAME.to_string(),
-                view_name: None,
-                max_records: builder.max_records,
-                fields: T::queried_fields(),
-                filter_formula: builder.filter_formula.clone(),
-            })
-            .await?;
-        let mut res = Vec::with_capacity(records.len());
-        for record in records {
-            match T::from_record(&record) {
-                Ok(r) => res.push(r),
-                Err(e) => {
-                    return Err(Error::ParseResponseFailed {
-                        source: e,
-                        record: record.clone(),
-                    });
-                }
-            }
-        }
-        Ok(res)
     }
 
     pub async fn list_filtered_querieable_records<

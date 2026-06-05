@@ -38,6 +38,44 @@ pub mod filters {
     pub struct AndFilter<T>(pub T);
     pub struct OrFilter<T>(pub T);
 
+    /// Matches records whose Airtable record id is one of the given ids
+    /// (`OR(RECORD_ID() = id, …)`). An empty `ids` yields an invalid `OR()`,
+    /// so callers must guard against it.
+    pub struct ByRecordIds<T> {
+        pub ids: Vec<String>,
+        _table: std::marker::PhantomData<fn() -> T>,
+    }
+
+    impl<T> ByRecordIds<T> {
+        pub fn new(ids: Vec<String>) -> Self {
+            Self {
+                ids,
+                _table: std::marker::PhantomData,
+            }
+        }
+    }
+
+    impl<T: AirtableTable> TableFilter for ByRecordIds<T> {
+        type Table = T;
+
+        fn filter_formula(&self) -> crate::formulas::Expression {
+            crate::formulas::Expression::FunctionCall(crate::formulas::Function::Or(
+                self.ids
+                    .iter()
+                    .map(|id| {
+                        crate::formulas::Expression::Infix(
+                            crate::formulas::Operator::Equal,
+                            Box::new(crate::formulas::Expression::FunctionCall(
+                                crate::formulas::Function::RecordId,
+                            )),
+                            Box::new(crate::formulas::Expression::TextLiteral(id.clone())),
+                        )
+                    })
+                    .collect(),
+            ))
+        }
+    }
+
     macro_rules! impl_tuple_filter {
         ($($name:ident)+) => {
             impl<T: TableFilter, $($name: TableFilter<Table = T::Table>,)+> TableFilter for AndFilter<(T, $($name,)+)> {
