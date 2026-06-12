@@ -168,6 +168,7 @@ macro_rules! airtable_queried_record {
             $(,)?
         }
     ) => {
+        #[derive(Debug)]
         $( #[$struct_attr] )*
         $vis struct $struct_name {
             $(
@@ -227,11 +228,13 @@ macro_rules! airtable_queried_record {
                 #[allow(unused_variables)] // when there are no fields
                 record: &$crate::Record<::serde_json::Value>,
             ) -> ::std::result::Result<Self, $crate::RecordParsingError> {
-                Ok(Self {
+                let out = Self {
                     $(
                         $field_name: $crate::airtable_queried_record!(@build_record record, $field_source, $field_name, $field_type $(, transform=|$field_var| $field_transform)? $(, default=$default_expr)?)?,
                     )*
-                })
+                };
+                ::tracing::debug!("Parsed record {}: {:?}", record.id, out);
+                Ok(out)
             }
         }
     };
@@ -389,7 +392,6 @@ mod tests {
         );
 
         airtable_queried_record! {
-            #[derive(Debug)]
             SomeRecord(table: SomeTable) {
                 must_have: "must_have" Option<String>,
                 optional: "optional" Option<String> [default=None],
