@@ -18,7 +18,7 @@ macro_rules! airtable_table {
 pub trait QueriedRecord {
     type Table: AirtableTable;
 
-    fn queried_fields() -> Vec<&'static str>;
+    fn queried_fields() -> (bool, Vec<&'static str>);
     fn from_record(
         record: &Record<serde_json::Value>,
     ) -> std::result::Result<Self, RecordParsingError>
@@ -156,6 +156,21 @@ pub enum RecordParsingError {
 ///     }
 /// }
 /// ```
+///
+/// ```compile_fail
+/// use airtable::{airtable_table, airtable_queried_record};
+///
+/// airtable_table!(
+///    pub MyTable(table: "tbl123")
+/// );
+///
+/// airtable_queried_record! {
+///     pub MyRecord(table: MyTable) {
+///         by_field_id: "fldLEc248cMlur9MX" String,
+///         by_field_name: "Name" String,
+///     }
+/// }
+/// ```
 #[macro_export]
 macro_rules! airtable_queried_record {
     (
@@ -179,7 +194,7 @@ macro_rules! airtable_queried_record {
         impl $crate::QueriedRecord for $struct_name {
             type Table = $table;
 
-            fn queried_fields() -> Vec<&'static str> {
+            fn queried_fields() -> (bool, Vec<&'static str>) {
                 const fn str_eq(a: &str, b: &str) -> bool {
                     let (a, b) = (a.as_bytes(), b.as_bytes());
                     if a.len() != b.len() { return false; }
@@ -220,8 +235,28 @@ macro_rules! airtable_queried_record {
 
                 const FIELD_NAMES: &[&'static str] = &$crate::airtable_queried_record!(@field_names $($field_source),*);
                 const N: usize = FIELD_NAMES.len();
+                const ARE_IDS: bool = {
+                    let mut are_ids = None;
+                    let mut i = 0;
+                    while i < N {
+                        let field_source = FIELD_NAMES[i].as_bytes();
+                        let is_id = field_source.len() > 8 && field_source[0] == b'f' && field_source[1] == b'l' && field_source[2] == b'd';
+                        if are_ids.is_none() {
+                            are_ids = Some(is_id);
+                        } else if are_ids.unwrap() != is_id {
+                            panic!("QueriedRecord fields must be either all IDs or all non-IDs");
+                        }
+                        i += 1;
+                    }
+                    if let Some(are_ids) = are_ids {
+                        are_ids
+                    } else {
+                        false
+                    }
+                };
                 const DATA: ([&'static str; N], usize) = const_dedup(FIELD_NAMES);
-                DATA.0[..DATA.1].to_vec()
+                let fields = DATA.0[..DATA.1].to_vec();
+                (ARE_IDS, fields)
             }
 
             fn from_record(
@@ -240,6 +275,8 @@ macro_rules! airtable_queried_record {
     };
     (@field_source_name ID) => { "ID" };
     (@field_source_name $field_source:literal) => { $field_source };
+    // A parenthesized constant path, e.g. `(zf::NAME)`, resolving to `&'static str`.
+    (@field_source_name ($($fs:tt)+)) => { $($fs)+ };
     (@field_names $($item:tt),*) => {
         $crate::airtable_queried_record!(@field_names_inner [$($item)*] -> [])
     };
@@ -248,6 +285,9 @@ macro_rules! airtable_queried_record {
     };
     (@field_names_inner [$field_source:literal $($rest:tt)*] -> [$($body:tt)*]) => {
         $crate::airtable_queried_record!(@field_names_inner [$($rest)*] -> [$($body)* $field_source])
+    };
+    (@field_names_inner [($($fs:tt)+) $($rest:tt)*] -> [$($body:tt)*]) => {
+        $crate::airtable_queried_record!(@field_names_inner [$($rest)*] -> [$($body)* ($($fs)+)])
     };
     (@field_names_inner [] -> [$($body:tt)*]) => {
         [$($body),*]
@@ -262,6 +302,10 @@ macro_rules! airtable_queried_record {
     (@get_field_value $record:ident, $field_source:literal) => {
         $record.fields.get($crate::airtable_queried_record!(@field_source_name $field_source))
             // .ok_or_else(|| $crate::RecordParsingError::MissingField { field_name: $crate::airtable_queried_record!(@field_source_name $field_source) })
+            .unwrap_or(&serde_json::Value::Null) // treat missing field as null, parsing will fail with InvalidField instead of MissingField
+    };
+    (@get_field_value $record:ident, ($($fs:tt)+)) => {
+        $record.fields.get($crate::airtable_queried_record!(@field_source_name ($($fs)+)))
             .unwrap_or(&serde_json::Value::Null) // treat missing field as null, parsing will fail with InvalidField instead of MissingField
     };
     (@build_record $record:ident, ID, $field_var:ident, $field_type:ty) => {
@@ -336,7 +380,7 @@ mod tests {
         );
         assert_eq!(
             SomeRecord::queried_fields(),
-            vec!["Jméno", "Příjmení", "Foobar"]
+            (false, vec!["Jméno", "Příjmení", "Foobar"])
         );
 
         let record = Record {
@@ -373,7 +417,7 @@ mod tests {
             <SomeRecord as super::QueriedRecord>::Table::TABLE_NAME,
             "tblTable1"
         );
-        assert!(SomeRecord::queried_fields().is_empty());
+        assert_eq!(SomeRecord::queried_fields(), (false, vec![]));
 
         let record = Record {
             id: "rec123".to_string(),
@@ -383,6 +427,52 @@ mod tests {
 
         let parsed = SomeRecord::from_record(&record).unwrap();
         assert_eq!(parsed.id, "rec123");
+    }
+
+    #[test]
+    fn test_const_field_source() {
+        mod fields {
+            pub const NAME: &str = "Jméno";
+        }
+
+        airtable_table!(
+            pub SomeTable(table: "tblTable1")
+        );
+
+        airtable_queried_record! {
+            SomeRecord(table: SomeTable) {
+                name: (fields::NAME) String,
+                transformed: (fields::NAME) String => |s| s.as_str().expect("should be str").to_uppercase(),
+            }
+        }
+
+        assert_eq!(SomeRecord::queried_fields(), (false, vec!["Jméno"]));
+
+        let record = Record {
+            id: "rec123".to_string(),
+            fields: serde_json::json!({
+                "Jméno": "John",
+            }),
+            created_time: None,
+        };
+
+        let parsed = SomeRecord::from_record(&record).unwrap();
+        assert_eq!(parsed.name, "John");
+        assert_eq!(parsed.transformed, "JOHN");
+
+        let invalid_record = Record {
+            id: "rec123".to_string(),
+            fields: serde_json::json!({}),
+            created_time: None,
+        };
+
+        let error = SomeRecord::from_record(&invalid_record).unwrap_err();
+        assert!(matches!(
+            error,
+            RecordParsingError::MissingField {
+                field_name: "Jméno"
+            }
+        ));
     }
 
     #[test]
@@ -423,5 +513,38 @@ mod tests {
                 field_name: "must_have"
             }
         ));
+    }
+
+    #[test]
+    fn test_field_ids() {
+        airtable_table!(
+            pub SomeTable(table: "tblTable1")
+        );
+
+        airtable_queried_record! {
+            SomeRecord(table: SomeTable) {
+                name: "fldi4B7LwXvN2taHr" String,
+            }
+        }
+
+        assert_eq!(
+            <SomeRecord as super::QueriedRecord>::Table::TABLE_NAME,
+            "tblTable1"
+        );
+        assert_eq!(
+            SomeRecord::queried_fields(),
+            (true, vec!["fldi4B7LwXvN2taHr"])
+        );
+
+        let record = Record {
+            id: "rec123".to_string(),
+            fields: serde_json::json!({
+                "fldi4B7LwXvN2taHr": "John",
+            }),
+            created_time: None,
+        };
+
+        let parsed = SomeRecord::from_record(&record).unwrap();
+        assert_eq!(parsed.name, "John");
     }
 }

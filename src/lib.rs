@@ -230,75 +230,6 @@ impl<HEIM: HasEnterpriseIdMarker> Airtable<HEIM> {
         Ok(rb.build()?)
     }
 
-    /// List records in a table for a particular view.
-    pub async fn list_records<T: DeserializeOwned>(
-        &self,
-        table: &str,
-        view: &str,
-        fields: Vec<&str>,
-    ) -> Result<Vec<Record<T>>> {
-        let mut params = vec![("pageSize", "100".to_string()), ("view", view.to_string())];
-        for field in fields {
-            params.push(("fields[]", field.to_string()));
-        }
-
-        // Build the request.
-        let mut request = self.request(Method::GET, table.to_string(), (), Some(params))?;
-
-        let mut resp = self.client.execute(request).await?;
-        match resp.status() {
-            StatusCode::OK => (),
-            s => {
-                return Err(Error::ApiError {
-                    status: s,
-                    body: resp.text().await?,
-                });
-            }
-        }
-
-        // Try to deserialize the response.
-        let mut r: APICall<T> = resp.json().await?;
-
-        let mut records = r.records;
-
-        let mut offset = r.offset;
-
-        // Paginate if we should.
-        // TODO: make this more DRY
-        while !offset.is_empty() {
-            request = self.request(
-                Method::GET,
-                table.to_string(),
-                (),
-                Some(vec![
-                    ("pageSize", "100".to_string()),
-                    ("view", view.to_string()),
-                    ("offset", offset),
-                ]),
-            )?;
-
-            resp = self.client.execute(request).await?;
-            match resp.status() {
-                StatusCode::OK => (),
-                s => {
-                    return Err(Error::ApiError {
-                        status: s,
-                        body: resp.text().await?,
-                    });
-                }
-            }
-
-            // Try to deserialize the response.
-            r = resp.json().await?;
-
-            records.append(&mut r.records);
-
-            offset = r.offset;
-        }
-
-        Ok(records)
-    }
-
     pub async fn list_filtered_querieable_records<
         T: macros::QueriedRecord,
         F: macros::filters::TableFilter<Table = T::Table>,
@@ -307,13 +238,15 @@ impl<HEIM: HasEnterpriseIdMarker> Airtable<HEIM> {
         filter: F,
         max_records: Option<u32>,
     ) -> Result<Vec<T>> {
+        let (return_fields_by_id, fields) = T::queried_fields();
         let records = self
             .list_records_build::<serde_json::Value>(&list_builder::ListRecords {
                 table_name: T::Table::TABLE_NAME.to_string(),
                 view_name: None,
                 max_records,
-                fields: T::queried_fields(),
+                fields,
                 filter_formula: Some(filter.filter_formula()),
+                return_fields_by_id,
             })
             .await?;
         let mut res = Vec::with_capacity(records.len());
@@ -336,106 +269,37 @@ impl<HEIM: HasEnterpriseIdMarker> Airtable<HEIM> {
         &self,
         builder: &list_builder::ListRecords,
     ) -> Result<Vec<Record<T>>> {
-        let mut params = vec![("pageSize", "100".to_string())];
-        if let Some(view) = &builder.view_name {
-            params.push(("view", view.to_string()));
+        let mut pages = self.pages(builder);
+        let mut records = Vec::new();
+        while let Some(mut page) = pages.next().await? {
+            records.append(&mut page);
         }
-        for field in &builder.fields {
-            params.push(("fields[]", field.to_string()));
-        }
-        if let Some(max_records) = builder.max_records {
-            params.push(("maxRecords", max_records.to_string()));
-        }
-        if let Some(filter_formula) = &builder.filter_formula {
-            let filter_formula = filter_formula.to_formula()?;
-            params.push(("filterByFormula", filter_formula));
-        }
-
-        tracing::debug!(params = ?params, "Built request parameters for list_records_build");
-
-        // Build the request.
-        let request = self.request(
-            Method::GET,
-            builder.table_name.to_string(),
-            (),
-            Some(params.clone()),
-        )?;
-
-        let mut resp = self.client.execute(request).await?;
-        match resp.status() {
-            StatusCode::OK => (),
-            s => {
-                return Err(Error::ApiError {
-                    status: s,
-                    body: resp.text().await?,
-                });
-            }
-        }
-
-        // Try to deserialize the response.
-        let r: APICall<T> = resp.json().await?;
-
-        let mut records = r.records;
-
-        let mut offset = r.offset;
-
-        // Paginate if we should.
-        // TODO: make this more DRY
-        while !offset.is_empty() {
-            let request = self.request(
-                Method::GET,
-                builder.table_name.to_string(),
-                (),
-                Some(
-                    params
-                        .iter()
-                        .filter(|(k, _)| k != &"maxRecords")
-                        .cloned()
-                        .chain(std::iter::once(("offset", offset.clone())))
-                        .collect(),
-                ),
-            )?;
-
-            resp = self.client.execute(request).await?;
-            match resp.status() {
-                StatusCode::OK => (),
-                s => {
-                    return Err(Error::ApiError {
-                        status: s,
-                        body: resp.text().await?,
-                    });
-                }
-            }
-
-            // Try to deserialize the response.
-            let mut r: APICall<T> = resp.json().await?;
-
-            records.append(&mut r.records);
-
-            offset = r.offset;
-        }
-
         Ok(records)
     }
 
     #[must_use]
-    pub fn pages<T: DeserializeOwned>(
-        &self,
-        table: &str,
-        view: &str,
-        fields: Vec<&str>,
-    ) -> Pages<'_, T, HEIM> {
-        Pages::new(self, table, view, &fields)
+    pub fn pages<'a, T: DeserializeOwned>(
+        &'a self,
+        builder: &'a list_builder::ListRecords,
+    ) -> Pages<'a, T, HEIM> {
+        Pages::new(self, builder)
     }
 
     /// Get record from a table.
     pub async fn get_record<T: DeserializeOwned>(
         &self,
-        table: &str,
-        record_id: &str,
+        builder: &list_builder::GetRecord,
     ) -> Result<Record<T>> {
         // Build the request.
-        let request = self.request(Method::GET, format!("{table}/{record_id}"), (), None)?;
+        let request = self.request(
+            Method::GET,
+            format!("{}/{}", builder.table_name, builder.record_id),
+            (),
+            Some(vec![(
+                "returnFieldsByFieldId",
+                builder.return_fields_by_id.to_string(),
+            )]),
+        )?;
 
         let resp = self.client.execute(request).await?;
         match resp.status() {
@@ -458,8 +322,13 @@ impl<HEIM: HasEnterpriseIdMarker> Airtable<HEIM> {
         &self,
         record_id: &str,
     ) -> Result<T> {
+        let (return_fields_by_id, _fields) = T::queried_fields();
         let record = self
-            .get_record::<serde_json::Value>(T::Table::TABLE_NAME, record_id)
+            .get_record::<serde_json::Value>(&list_builder::GetRecord {
+                table_name: T::Table::TABLE_NAME.to_string(),
+                record_id: record_id.to_string(),
+                return_fields_by_id,
+            })
             .await?;
         match T::from_record(&record) {
             Ok(r) => Ok(r),
@@ -535,44 +404,42 @@ impl<HEIM: HasEnterpriseIdMarker> Airtable<HEIM> {
     /// The Airtable API limits record creation requests to 10 records per request. Because of
     /// this, calls to this function containing more than 10 records will send multiple requests
     /// (one request for each chunk of 10 records) to the Airtable API.
-    pub async fn create_records<In: Serialize + DeserializeOwned>(
-        &self,
-        table: &str,
-        records: Vec<Record<In>>,
-    ) -> Result<Vec<Record<In>>> {
-        if records.len() <= 10 {
-            self.create_records_inner(table, records).await
-        } else {
-            let mut res = Vec::new();
-
-            let mut records = records.into_iter();
-            while records.len() > 0 {
-                let chunk = (&mut records).take(10).collect();
-                res.extend(self.create_records_inner(table, chunk).await?);
-            }
-
-            Ok(res)
-        }
-    }
-
     pub async fn create_querieable_records<In: Serialize, Out: macros::QueriedRecord>(
         &self,
         records: Vec<Record<In>>,
     ) -> Result<Vec<Out>> {
         let table = Out::Table::TABLE_NAME;
-        let created_records = if records.len() <= 10 {
-            self.create_records_inner(table, records).await?
-        } else {
-            let mut res = Vec::new();
+        let (return_fields_by_id, _fields) = Out::queried_fields();
 
-            let mut records = records.into_iter();
-            while records.len() > 0 {
-                let chunk = (&mut records).take(10).collect();
-                res.extend(self.create_records_inner(table, chunk).await?);
+        let mut created_records = Vec::new();
+        let mut records = records.into_iter();
+        while records.len() > 0 {
+            let chunk: Vec<_> = (&mut records).take(10).collect();
+            let request = self.request(
+                Method::POST,
+                table.to_string(),
+                APICall {
+                    records: chunk,
+                    offset: String::new(),
+                    typecast: Some(true),
+                    perform_upsert: None,
+                    return_fields_by_field_id: Some(return_fields_by_id),
+                },
+                None,
+            )?;
+            let resp = self.client.execute(request).await?;
+            match resp.status() {
+                StatusCode::OK => (),
+                s => {
+                    return Err(Error::ApiError {
+                        status: s,
+                        body: resp.text().await?,
+                    });
+                }
             }
-
-            res
-        };
+            let r: APICall<_> = resp.json().await?;
+            created_records.extend(r.records);
+        }
 
         let mut res = Vec::with_capacity(created_records.len());
         for record in created_records {
@@ -589,89 +456,43 @@ impl<HEIM: HasEnterpriseIdMarker> Airtable<HEIM> {
         Ok(res)
     }
 
-    /// Bulk create records in a table.
-    ///
-    /// The provided `records` vector MUST contain at most 10 items, or this function will panic.
-    async fn create_records_inner<In: Serialize, Out: DeserializeOwned>(
-        &self,
-        table: &str,
-        records: Vec<Record<In>>,
-    ) -> Result<Vec<Record<Out>>> {
-        assert!(records.len() <= 10);
-
-        // Build the request.
-        let request = self.request(
-            Method::POST,
-            table.to_string(),
-            APICall {
-                records,
-                offset: String::new(),
-                typecast: Some(true),
-                perform_upsert: None,
-            },
-            None,
-        )?;
-
-        let resp = self.client.execute(request).await?;
-        match resp.status() {
-            StatusCode::OK => (),
-            s => {
-                return Err(Error::ApiError {
-                    status: s,
-                    body: resp.text().await?,
-                });
-            }
-        }
-
-        // Try to deserialize the response.
-        let r: APICall<Out> = resp.json().await?;
-
-        Ok(r.records)
-    }
-
     /// Bulk update records in a table.
     ///
     /// The Airtable API limits record update requests to 10 records per request. Because of
     /// this, calls to this function containing more than 10 records will send multiple requests
     /// (one request for each chunk of 10 records) to the Airtable API.
-    pub async fn update_records<T: Serialize + DeserializeOwned>(
+    pub async fn update_records<T: Serialize>(
         &self,
         table: &str,
         records: Vec<Record<T>>,
-    ) -> Result<Vec<Record<T>>> {
-        if records.len() <= 10 {
-            self.update_records_inner(table, records).await
-        } else {
-            let mut res = Vec::new();
-
-            let mut records = records.into_iter();
-            while records.len() > 0 {
-                let chunk = (&mut records).take(10).collect();
-                res.extend(self.update_records_inner(table, chunk).await?);
-            }
-
-            Ok(res)
+    ) -> Result<()> {
+        let mut records = records.into_iter();
+        while records.len() > 0 {
+            let chunk = (&mut records).take(10).collect();
+            self.update_records_inner::<_, ()>(table, chunk, None)
+                .await?;
         }
+
+        Ok(())
     }
 
+    /// Bulk update records in a table and return the updated records.
     pub async fn update_querieable_records<In: Serialize, Out: macros::QueriedRecord>(
         &self,
         records: Vec<Record<In>>,
     ) -> Result<Vec<Out>> {
         let table = Out::Table::TABLE_NAME;
-        let updated_records = if records.len() <= 10 {
-            self.update_records_inner(table, records).await?
-        } else {
-            let mut res = Vec::new();
+        let (return_fields_by_id, _fields) = Out::queried_fields();
 
-            let mut records = records.into_iter();
-            while records.len() > 0 {
-                let chunk = (&mut records).take(10).collect();
-                res.extend(self.update_records_inner(table, chunk).await?);
-            }
-
-            res
-        };
+        let mut updated_records = Vec::new();
+        let mut records = records.into_iter();
+        while records.len() > 0 {
+            let chunk = (&mut records).take(10).collect();
+            updated_records.extend(
+                self.update_records_inner(table, chunk, Some(return_fields_by_id))
+                    .await?,
+            );
+        }
 
         updated_records
             .into_iter()
@@ -691,6 +512,7 @@ impl<HEIM: HasEnterpriseIdMarker> Airtable<HEIM> {
         &self,
         table: &str,
         records: Vec<Record<In>>,
+        return_fields_by_field_id: Option<bool>,
     ) -> Result<Vec<Record<Out>>> {
         assert!(records.len() <= 10);
 
@@ -703,6 +525,7 @@ impl<HEIM: HasEnterpriseIdMarker> Airtable<HEIM> {
                 offset: String::new(),
                 typecast: Some(true),
                 perform_upsert: None,
+                return_fields_by_field_id,
             },
             None,
         )?;
@@ -776,6 +599,7 @@ impl<HEIM: HasEnterpriseIdMarker> Airtable<HEIM> {
                 perform_upsert: Some(APICallPerformUpsert {
                     fields_to_merge_on: fields_to_merge_on.iter().map(|s| s.to_string()).collect(),
                 }),
+                return_fields_by_field_id: Some(true),
             },
             None,
         )?;
@@ -999,9 +823,7 @@ impl Airtable<HasEnterpriseId> {
 
 pub struct Pages<'a, T, HEIM: HasEnterpriseIdMarker = DoesNotHaveEnterpriseId> {
     client: &'a Airtable<HEIM>,
-    table: String,
-    view: String,
-    fields: Vec<String>,
+    builder: &'a list_builder::ListRecords,
     offset: Option<String>,
     record_type: PhantomData<T>,
 }
@@ -1012,15 +834,10 @@ where
     HEIM: HasEnterpriseIdMarker,
 {
     #[must_use]
-    pub fn new(client: &'a Airtable<HEIM>, table: &str, view: &str, fields: &[&str]) -> Self {
+    pub fn new(client: &'a Airtable<HEIM>, builder: &'a list_builder::ListRecords) -> Self {
         Self {
             client,
-            table: table.to_string(),
-            view: view.to_string(),
-            fields: fields
-                .iter()
-                .map(std::string::ToString::to_string)
-                .collect::<Vec<_>>(),
+            builder,
             offset: Some(String::new()),
             record_type: PhantomData,
         }
@@ -1032,7 +849,24 @@ where
             return Ok(None);
         }
 
-        let mut params = vec![("pageSize", "100".to_string()), ("view", self.view.clone())];
+        let mut params = vec![("pageSize", "100".to_string())];
+        if let Some(view) = &self.builder.view_name {
+            params.push(("view", view.clone()));
+        }
+        for field in &self.builder.fields {
+            params.push(("fields[]", field.to_string()));
+        }
+        if let Some(max_records) = self.builder.max_records {
+            params.push(("maxRecords", max_records.to_string()));
+        }
+        if let Some(filter_formula) = &self.builder.filter_formula {
+            let filter_formula = filter_formula.to_formula()?;
+            params.push(("filterByFormula", filter_formula));
+        }
+        params.push((
+            "returnFieldsByFieldId",
+            self.builder.return_fields_by_id.to_string(),
+        ));
 
         if let Some(offset) = &self.offset {
             if !offset.is_empty() {
@@ -1043,14 +877,13 @@ where
             log::debug!("[airtable-api] Requesting first page of records");
         }
 
-        for field in &self.fields {
-            params.push(("fields[]", field.clone()));
-        }
-
         // Build the request.
-        let request = self
-            .client
-            .request(Method::GET, self.table.clone(), (), Some(params))?;
+        let request = self.client.request(
+            Method::GET,
+            self.builder.table_name.clone(),
+            (),
+            Some(params),
+        )?;
 
         let response = self.client.client.execute(request).await?;
 
@@ -1104,6 +937,13 @@ struct APICall<T> {
     /// See https://airtable.com/developers/web/api/update-multiple-records for more details.
     #[serde(skip_serializing_if = "Option::is_none", rename = "performUpsert")]
     pub perform_upsert: Option<APICallPerformUpsert>,
+    /// When set on a write request, the response's `fields` objects (and the request's
+    /// own `fields` keys) are keyed by field id instead of field name.
+    #[serde(
+        skip_serializing_if = "Option::is_none",
+        rename = "returnFieldsByFieldId"
+    )]
+    pub return_fields_by_field_id: Option<bool>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

@@ -9,4 +9,13 @@ pub struct ListRecords {
     pub fields: Vec<&'static str>,
     /// Formula to filter records. `filterByFormula` parameter of Airtable API.
     pub filter_formula: Option<Expression>,
+    /// If true, the response will use field ids instead of field names. `returnFieldsByFieldId` parameter of Airtable API.
+    pub return_fields_by_id: bool,
+}
+
+pub struct GetRecord {
+    pub table_name: String,
+    pub record_id: String,
+    /// If true, the response will use field ids instead of field names. `returnFieldsByFieldId` parameter of Airtable API.
+    pub return_fields_by_id: bool,
 }
