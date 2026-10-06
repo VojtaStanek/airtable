@@ -126,6 +126,24 @@ pub enum RecordParsingError {
     },
     #[error("Missing field: {field_name}")]
     MissingField { field_name: &'static str },
+    /// The field's fallible (`=>?`) transform returned an error.
+    #[error("Transform of field {field_name} failed: {message}")]
+    TransformFailed {
+        field_name: &'static str,
+        message: String,
+    },
+}
+
+impl RecordParsingError {
+    /// The Airtable field (name or ID, as declared in the query) that failed to parse.
+    #[must_use]
+    pub fn field_name(&self) -> &'static str {
+        match self {
+            Self::InvalidField { field_name, .. }
+            | Self::MissingField { field_name }
+            | Self::TransformFailed { field_name, .. } => field_name,
+        }
+    }
 }
 
 /// Helper macro to define a struct representing a queried Airtable record, along with the implementation of `QueriedRecord`.
@@ -135,6 +153,10 @@ pub enum RecordParsingError {
 /// `v` is the field's raw `&serde_json::Value` (i.e. `record.fields.get("Airtable Field")`).
 /// If the field is null/missing, [default=...] is used and the transform is skipped;
 /// otherwise the transform runs. So transforms only see non-null values.
+///
+/// `field: "Airtable Field" Type [default=expr] =>? |v| transform` is the fallible variant:
+/// the transform returns `Result<Type, impl Display>` and an `Err` becomes
+/// `RecordParsingError::TransformFailed`. Use it instead of panicking on unexpected values.
 ///
 ///
 /// `id: ID String` pulls record.id and is excluded from the fetched field list.
@@ -179,6 +201,7 @@ macro_rules! airtable_queried_record {
             $(
                 $field_vis:vis $field_name:ident : $field_source:tt $field_type:ty $([default=$default_expr:expr])?
                 $(=> |$field_var:ident| $field_transform:expr)?
+                $(=>? |$try_var:ident| $try_transform:expr)?
             ),*
             $(,)?
         }
@@ -265,7 +288,7 @@ macro_rules! airtable_queried_record {
             ) -> ::std::result::Result<Self, $crate::RecordParsingError> {
                 let out = Self {
                     $(
-                        $field_name: $crate::airtable_queried_record!(@build_record record, $field_source, $field_name, $field_type $(, transform=|$field_var| $field_transform)? $(, default=$default_expr)?)?,
+                        $field_name: $crate::airtable_queried_record!(@build_record record, $field_source, $field_name, $field_type $(, transform=|$field_var| $field_transform)? $(, try_transform=|$try_var| $try_transform)? $(, default=$default_expr)?)?,
                     )*
                 };
                 ::tracing::debug!("Parsed record {}: {:?}", record.id, out);
@@ -327,6 +350,16 @@ macro_rules! airtable_queried_record {
             Ok({ $transform_block })
         }
     };
+    (@parse_field $raw:ident $field_source:tt $field_type:ty ; try | $transform_var:ident | $transform_block:expr) => {
+        {
+            let $transform_var: &::serde_json::Value = $raw;
+            let result: ::std::result::Result<$field_type, _> = { $transform_block };
+            result.map_err(|e| $crate::RecordParsingError::TransformFailed {
+                field_name: $crate::airtable_queried_record!(@field_source_name $field_source),
+                message: e.to_string(),
+            })
+        }
+    };
     (@parse_field $raw:ident $field_source:tt $field_type:ty) => {
         ::serde_json::from_value::<$field_type>($raw.clone())
             .map_err(|e| $crate::RecordParsingError::InvalidField {
@@ -334,13 +367,13 @@ macro_rules! airtable_queried_record {
                 source: e
             })
     };
-    (@build_record $record:ident, $field_source:tt, $field_var:ident, $field_type:ty $(, transform=|$transform_var:ident| $transform_block:expr)? $(, default=$default_expr:expr)? ) => {
+    (@build_record $record:ident, $field_source:tt, $field_var:ident, $field_type:ty $(, transform=|$transform_var:ident| $transform_block:expr)? $(, try_transform=|$try_var:ident| $try_block:expr)? $(, default=$default_expr:expr)? ) => {
         {
             let raw: &::serde_json::Value = $crate::airtable_queried_record!(@get_field_value $record, $field_source);
             if raw.is_null() {
                 $crate::airtable_queried_record!(@get_default $field_source $( $default_expr )?)
             } else {
-                $crate::airtable_queried_record!(@parse_field raw $field_source $field_type $(|$transform_var| $transform_block)?)
+                $crate::airtable_queried_record!(@parse_field raw $field_source $field_type $(|$transform_var| $transform_block)? $(; try |$try_var| $try_block)?)
             }
         }
     };
@@ -473,6 +506,38 @@ mod tests {
                 field_name: "Jméno"
             }
         ));
+    }
+
+    #[test]
+    fn test_failing_transform_becomes_error() {
+        airtable_table!(
+            pub SomeTable(table: "tblTable1")
+        );
+
+        airtable_queried_record! {
+            SomeRecord(table: SomeTable) {
+                first: "Pole" String =>? |v| v.as_array().map(|a| a.len().to_string()).ok_or("expected an array"),
+            }
+        }
+
+        let record = Record {
+            id: "rec123".to_string(),
+            fields: serde_json::json!({ "Pole": "not an array" }),
+            created_time: None,
+        };
+
+        let error = SomeRecord::from_record(&record).unwrap_err();
+        assert_eq!(error.field_name(), "Pole");
+        match error {
+            RecordParsingError::TransformFailed {
+                field_name,
+                message,
+            } => {
+                assert_eq!(field_name, "Pole");
+                assert!(message.contains("expected an array"), "{message}");
+            }
+            other => panic!("unexpected error: {other:?}"),
+        }
     }
 
     #[test]

@@ -182,6 +182,12 @@ impl<HEIM: HasEnterpriseIdMarker> Airtable<HEIM> {
         )
     }
 
+    /// The ID of the base this client talks to.
+    #[must_use]
+    pub fn base_id(&self) -> &str {
+        &self.base_id
+    }
+
     /// Get the currently set API key.
     #[must_use]
     pub fn get_key(&self) -> &str {
@@ -262,6 +268,57 @@ impl<HEIM: HasEnterpriseIdMarker> Airtable<HEIM> {
             }
         }
         Ok(res)
+    }
+
+    /// Lists every record of `T`'s table (no filter) and parses each one leniently: a record
+    /// that fails to parse yields an `Err` with the parsing error and the raw record instead of
+    /// aborting the whole listing. `extra_fields` are fetched in addition to
+    /// `T::queried_fields()` (e.g. a primary field used as a label) and must use the same
+    /// naming mode (IDs or names) as `T`.
+    pub async fn list_querieable_records_lenient<T: macros::QueriedRecord>(
+        &self,
+        extra_fields: &[&'static str],
+    ) -> Result<Vec<RecordParse<T>>> {
+        let (return_fields_by_id, mut fields) = T::queried_fields();
+        fields.extend_from_slice(extra_fields);
+        let records = self
+            .list_records_build::<serde_json::Value>(&list_builder::ListRecords {
+                table_name: T::Table::TABLE_NAME.to_string(),
+                view_name: None,
+                max_records: None,
+                fields,
+                filter_formula: None,
+                return_fields_by_id,
+            })
+            .await?;
+        Ok(records
+            .into_iter()
+            .map(|record| {
+                T::from_record(&record).map_err(|error| RecordParseFailure { error, record })
+            })
+            .collect())
+    }
+
+    /// Fetches the schema (tables and their fields) of the base from the Meta API.
+    /// Requires the `schema.bases:read` scope on the token.
+    pub async fn get_base_schema(&self) -> Result<BaseSchema> {
+        let url = Url::parse(ENDPOINT)?.join(&format!("meta/bases/{}/tables", self.base_id))?;
+        let resp = self
+            .client
+            .get(url)
+            .header(header::AUTHORIZATION, format!("Bearer {}", self.key))
+            .send()
+            .await?;
+        match resp.status() {
+            StatusCode::OK => (),
+            s => {
+                return Err(Error::ApiError {
+                    status: s,
+                    body: resp.text().await?,
+                });
+            }
+        }
+        Ok(resp.json().await?)
     }
 
     /// List records in a table for a particular view.
@@ -956,6 +1013,37 @@ struct APICallPerformUpsert {
     /// Records that include id will ignore fieldsToMergeOn and behave as normal updates. If no record with the given id exists, the request will fail and will not create a new record. The API response for upsert requests will additionally include updatedRecords and createdRecords arrays, indicating which records in the records array already existed and were updated, or did not exist and were created, respectively.
     #[serde(rename = "fieldsToMergeOn")]
     fields_to_merge_on: Vec<String>,
+}
+
+/// The outcome of leniently parsing one record: the parsed value, or the failure.
+pub type RecordParse<T> = std::result::Result<T, RecordParseFailure>;
+
+/// A record that failed to parse, together with the raw record.
+#[derive(Debug)]
+pub struct RecordParseFailure {
+    pub error: RecordParsingError,
+    pub record: Record<serde_json::Value>,
+}
+
+/// The schema of a base, as returned by the Meta API.
+#[derive(Debug, Clone, Deserialize)]
+pub struct BaseSchema {
+    pub tables: Vec<TableSchema>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct TableSchema {
+    pub id: String,
+    pub name: String,
+    #[serde(rename = "primaryFieldId")]
+    pub primary_field_id: String,
+    pub fields: Vec<FieldSchema>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct FieldSchema {
+    pub id: String,
+    pub name: String,
 }
 
 /// An Airtable record.
