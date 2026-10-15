@@ -516,7 +516,7 @@ mod tests {
 
         airtable_queried_record! {
             SomeRecord(table: SomeTable) {
-                first: "Pole" String =>? |v| v.as_array().map(|a| a.len().to_string()).ok_or("expected an array"),
+                _first: "Pole" String =>? |v| v.as_array().map(|a| a.len().to_string()).ok_or("expected an array"),
             }
         }
 
