@@ -6,7 +6,7 @@ use winnow::{
     Parser, Result,
 };
 
-use super::References;
+use super::{References, MAX_NESTING};
 use crate::markdown::{Inline, Inlines};
 
 /// Characters that may start something other than plain text.
@@ -14,11 +14,17 @@ const SPECIAL: [char; 6] = ['\\', '`', '[', '*', '_', '~'];
 
 /// Parses the inline content of a single line.
 pub(super) fn parse(text: &str, references: &References) -> Inlines {
-    InlineParser { references }.inlines(text)
+    InlineParser {
+        references,
+        depth: 0,
+    }
+    .inlines(text)
 }
 
 struct InlineParser<'a> {
     references: &'a References,
+    /// How many links and emphasis spans enclose the text being parsed.
+    depth: usize,
 }
 
 /// One step of inline parsing: literal text or a parsed node.
@@ -40,6 +46,21 @@ impl InlineParser<'_> {
             .parse(text)
             .expect("`piece` accepts any character")
             .finish()
+    }
+
+    /// Parses the content of a link or emphasis span. Beyond [`MAX_NESTING`] levels the
+    /// content is kept as literal text, which bounds recursion on hostile input.
+    fn nested(&self, text: &str) -> Inlines {
+        if self.depth >= MAX_NESTING {
+            let mut out = InlineBuilder::default();
+            out.text.push_str(text);
+            return out.finish();
+        }
+        InlineParser {
+            references: self.references,
+            depth: self.depth + 1,
+        }
+        .inlines(text)
     }
 
     /// Parses a node, falling back to a single literal character when nothing matches.
@@ -77,7 +98,7 @@ impl InlineParser<'_> {
         };
         let inner = take_bytes(input, end);
         take_while(len..=len, delimiter).parse_next(input)?;
-        let inner = self.inlines(inner);
+        let inner = self.nested(inner);
         Ok(match (delimiter, len) {
             ('~', _) => Inline::Strikethrough(inner),
             (_, 2) => Inline::Bold(inner),
@@ -104,7 +125,7 @@ impl InlineParser<'_> {
         ))
         .parse_next(input)?;
         Ok(Inline::Link {
-            content: self.inlines(content),
+            content: self.nested(content),
             url,
         })
     }
@@ -221,7 +242,10 @@ fn find_bracket_close(text: &str) -> Option<usize> {
 
 #[cfg(test)]
 mod tests {
+    use std::mem;
+
     use super::super::test_helpers::*;
+    use super::MAX_NESTING;
     use crate::markdown::{Inline, Inlines};
 
     #[test]
@@ -333,6 +357,19 @@ mod tests {
             let input = delimiter.repeat(2_000);
             assert_eq!(inline(&input), vec![text(&input)], "{delimiter}");
         }
+    }
+
+    #[test]
+    fn nesting_is_capped() {
+        let input = format!("{}x{}", "[".repeat(10_000), "](u)".repeat(10_000));
+        let mut nodes = inline(&input);
+        let mut depth = 0;
+        while let [Inline::Link { content, .. }] = nodes.as_mut_slice() {
+            depth += 1;
+            nodes = mem::take(&mut content.0);
+        }
+        assert_eq!(depth, MAX_NESTING + 1);
+        assert!(matches!(nodes.as_slice(), [Inline::Text(text)] if text.starts_with("[[")));
     }
 
     #[test]

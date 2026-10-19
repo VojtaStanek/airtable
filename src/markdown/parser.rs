@@ -1,6 +1,13 @@
 use std::{collections::HashMap, mem};
 
-use super::{Block, Document, List, ListItem, ListKind};
+use winnow::{
+    combinator::{alt, eof, preceded, repeat, repeat_till},
+    error::ContextError,
+    token::any,
+    Parser, Result,
+};
+
+use super::{Block, Document, Inlines, List, ListItem};
 use lines::{heading, is_fence, list_item, quote_line, reference_definition, ItemLine};
 
 mod inlines;
@@ -19,129 +26,125 @@ pub fn parse(input: &str) -> Document {
         .filter_map(|line| reference_definition(line))
         .map(|(label, url)| (label.to_lowercase(), url.to_string()))
         .collect();
-    let parser = Parser { references };
+    let parser = BlockParser { references };
     Document {
-        blocks: parser.blocks(&lines),
+        blocks: parser.blocks(&lines, 0),
     }
 }
 
-struct Parser {
+/// Parses blocks from a stream of lines.
+struct BlockParser {
     references: References,
 }
 
-impl Parser {
-    fn blocks(&self, lines: &[&str]) -> Vec<Block> {
-        let mut blocks = Vec::new();
-        let mut lists: Vec<(usize, List)> = Vec::new();
-        let mut i = 0;
-        while i < lines.len() {
-            let line = lines[i];
-            if let Some(item) = list_item(line) {
-                self.push_list_item(&mut lists, &mut blocks, item);
-                i += 1;
-                continue;
-            }
-            while !lists.is_empty() {
-                close_list(&mut lists, &mut blocks);
-            }
+/// How deep quotes and lists may nest. Each level recurses, so this bounds stack
+/// usage on hostile input. Deeper `>` markers are kept as literal text and deeper list
+/// items become sibling lists at the deepest level.
+const MAX_NESTING: usize = 64;
 
-            if is_fence(line) {
-                let mut code = Vec::new();
-                i += 1;
-                while i < lines.len() && !is_fence(lines[i]) {
-                    code.push(lines[i]);
-                    i += 1;
-                }
-                blocks.push(Block::CodeBlock {
-                    code: code.join("\n"),
-                });
-            } else if line.trim().is_empty() {
-                blocks.push(Block::Empty);
-            } else if reference_definition(line).is_some() {
-                // Definitions were collected up front and produce no output.
-            } else if let Some((level, content)) = heading(line) {
-                blocks.push(Block::Heading {
+impl BlockParser {
+    /// Parses `lines` nested inside `depth` quotes and lists.
+    fn blocks(&self, lines: &[&str], depth: usize) -> Vec<Block> {
+        repeat(0.., |input: &mut &[&str]| self.block(input, depth))
+            .fold(Vec::new, |mut blocks, block| {
+                blocks.extend(block);
+                blocks
+            })
+            .parse(lines)
+            .expect("a paragraph accepts any line")
+    }
+
+    /// Parses one block, or `None` for lines that produce no output.
+    fn block(&self, input: &mut &[&str], depth: usize) -> Result<Option<Block>> {
+        let can_nest = depth < MAX_NESTING;
+        alt((
+            (|input: &mut &[&str]| self.list(input, None, depth))
+                .map(|list| Some(Block::List(list))),
+            code_block.map(Some),
+            line(|line| line.trim().is_empty().then_some(Some(Block::Empty))),
+            // Definitions were collected up front and produce no output.
+            line(reference_definition).value(None),
+            line(heading).map(|(level, content)| {
+                Some(Block::Heading {
                     level,
-                    content: inlines::parse(content, &self.references),
-                });
-            } else if quote_line(line).is_some() {
-                let mut quoted = Vec::new();
-                while let Some(rest) = lines.get(i).and_then(|line| quote_line(line)) {
-                    quoted.push(rest);
-                    i += 1;
-                }
-                blocks.push(Block::BlockQuote(self.blocks(&quoted)));
-                continue;
-            } else {
-                blocks.push(Block::Paragraph(inlines::parse(
-                    line.trim(),
-                    &self.references,
-                )));
-            }
-            i += 1;
-        }
-        while !lists.is_empty() {
-            close_list(&mut lists, &mut blocks);
-        }
-        blocks
+                    content: self.inlines(content),
+                })
+            }),
+            repeat(1.., line(move |line| quote_line(line).filter(|_| can_nest)))
+                .map(|quoted: Vec<&str>| Some(Block::BlockQuote(self.blocks(&quoted, depth + 1)))),
+            any.map(|line: &str| Some(Block::Paragraph(self.inlines(line.trim())))),
+        ))
+        .parse_next(input)
     }
 
-    fn push_list_item(
+    /// Parses a list whose items are indented deeper than `parent`, the indentation of
+    /// the item it is nested in.
+    fn list<'a>(
         &self,
-        lists: &mut Vec<(usize, List)>,
-        blocks: &mut Vec<Block>,
-        item: ItemLine,
-    ) {
-        loop {
-            match lists.last() {
-                Some((indent, _)) if item.indent < *indent => close_list(lists, blocks),
-                Some((indent, list))
-                    if item.indent == *indent
-                        && mem::discriminant(&list.kind) != mem::discriminant(&item.kind) =>
-                {
-                    close_list(lists, blocks);
-                    lists.push((item.indent, List::new(item.kind)));
-                    break;
-                }
-                Some((indent, _)) if item.indent == *indent => break,
-                // Deeper indentation (or no open list) starts a new list.
-                _ => {
-                    lists.push((item.indent, List::new(item.kind)));
-                    break;
-                }
-            }
-        }
-        let (_, list) = lists.last_mut().expect("a list was just ensured");
-        list.items.push(ListItem {
-            checked: item.checked,
-            content: inlines::parse(item.text.trim(), &self.references),
-            children: Vec::new(),
-        });
+        input: &mut &[&'a str],
+        parent: Option<usize>,
+        depth: usize,
+    ) -> Result<List> {
+        let first = line(list_item)
+            .verify(|item: &ItemLine| {
+                depth < MAX_NESTING && parent.is_none_or(|parent| item.indent > parent)
+            })
+            .parse_next(input)?;
+        let (indent, kind) = (first.indent, first.kind);
+        let mut items = vec![self.item(input, first, depth)?];
+        let siblings: Vec<ListItem> = repeat(0.., |input: &mut &[&'a str]| {
+            let item = line(list_item)
+                .verify(|item: &ItemLine| {
+                    item.indent == indent
+                        && mem::discriminant(&item.kind) == mem::discriminant(&kind)
+                })
+                .parse_next(input)?;
+            self.item(input, item, depth)
+        })
+        .parse_next(input)?;
+        items.extend(siblings);
+        Ok(List { kind, items })
+    }
+
+    /// Builds an item of a list nested `depth` levels deep from its line and the lists
+    /// nested under it.
+    fn item<'a>(
+        &self,
+        input: &mut &[&'a str],
+        line: ItemLine<'a>,
+        depth: usize,
+    ) -> Result<ListItem> {
+        let children = repeat(0.., |input: &mut &[&'a str]| {
+            self.list(input, Some(line.indent), depth + 1)
+        })
+        .parse_next(input)?;
+        Ok(ListItem {
+            checked: line.checked,
+            content: self.inlines(line.text.trim()),
+            children,
+        })
+    }
+
+    fn inlines(&self, text: &str) -> Inlines {
+        inlines::parse(text, &self.references)
     }
 }
 
-impl List {
-    fn new(kind: ListKind) -> Self {
-        List {
-            kind,
-            items: Vec::new(),
-        }
-    }
+/// Lines between ```` ``` ```` fences. An unterminated fence runs to the end of the input.
+fn code_block(input: &mut &[&str]) -> Result<Block> {
+    let fence = || line(|line| is_fence(line).then_some(()));
+    preceded(fence(), repeat_till(0.., any, alt((fence(), eof.void()))))
+        .map(|(code, ()): (Vec<&str>, ())| Block::CodeBlock {
+            code: code.join("\n"),
+        })
+        .parse_next(input)
 }
 
-/// Pops the innermost open list and attaches it to its parent item, or to `blocks`
-/// when it is a top-level list.
-fn close_list(lists: &mut Vec<(usize, List)>, blocks: &mut Vec<Block>) {
-    let Some((_, list)) = lists.pop() else {
-        return;
-    };
-    match lists
-        .last_mut()
-        .and_then(|(_, parent)| parent.items.last_mut())
-    {
-        Some(parent) => parent.children.push(list),
-        None => blocks.push(Block::List(list)),
-    }
+/// Matches one line for which `f` returns `Some`.
+fn line<'i, 'a: 'i, O>(
+    f: impl Fn(&'a str) -> Option<O>,
+) -> impl Parser<&'i [&'a str], O, ContextError> {
+    any.verify_map(f)
 }
 
 #[cfg(test)]
@@ -196,8 +199,10 @@ mod test_helpers {
 
 #[cfg(test)]
 mod tests {
-    use super::test_helpers::*;
-    use crate::markdown::{parse, Block, Document, Inline, ListItem, ListKind};
+    use std::mem;
+
+    use super::{test_helpers::*, MAX_NESTING};
+    use crate::markdown::{parse, Block, Document, Inline, List, ListItem, ListKind};
 
     #[test]
     fn full_example() {
@@ -340,6 +345,81 @@ mod tests {
                 )),
             ]
         );
+    }
+
+    #[test]
+    fn item_between_indents_nests_under_parent() {
+        let bullets = |s: &str| list(ListKind::Bullet, vec![item(s, vec![])]);
+        assert_eq!(
+            parse("- a\n    - b\n  - c").blocks,
+            vec![Block::List(list(
+                ListKind::Bullet,
+                vec![item("a", vec![bullets("b"), bullets("c")])],
+            ))]
+        );
+    }
+
+    #[test]
+    fn nested_kind_change_starts_sibling_list() {
+        assert_eq!(
+            parse("- a\n  - b\n  1. c\n- d").blocks,
+            vec![Block::List(list(
+                ListKind::Bullet,
+                vec![
+                    item(
+                        "a",
+                        vec![
+                            list(ListKind::Bullet, vec![item("b", vec![])]),
+                            list(ListKind::Ordered { start: 1 }, vec![item("c", vec![])]),
+                        ],
+                    ),
+                    item("d", vec![]),
+                ],
+            ))]
+        );
+    }
+
+    #[test]
+    fn nesting_is_capped() {
+        // Far deeper than the stack would allow without the cap.
+        const DEPTH: usize = 10_000;
+        // Indentation makes nested list input quadratic in size, so use fewer levels.
+        const LIST_DEPTH: usize = 1_000;
+
+        let input: Vec<String> = (0..LIST_DEPTH)
+            .map(|i| format!("{}- x", " ".repeat(i)))
+            .collect();
+        let mut level: Vec<List> = parse(&input.join("\n"))
+            .blocks
+            .into_iter()
+            .map(|block| match block {
+                Block::List(list) => list,
+                other => panic!("expected a list, got {other:?}"),
+            })
+            .collect();
+        let mut widths = Vec::new();
+        while !level.is_empty() {
+            widths.push(level.len());
+            level = level
+                .into_iter()
+                .flat_map(|list| list.items)
+                .flat_map(|item| item.children)
+                .collect();
+        }
+        assert_eq!(widths.len(), MAX_NESTING);
+        assert!(widths[..MAX_NESTING - 1].iter().all(|&width| width == 1));
+        // Items that don't fit become sibling lists at the deepest level, one each.
+        assert_eq!(widths[MAX_NESTING - 1], LIST_DEPTH - MAX_NESTING + 1);
+
+        let mut blocks = parse(&format!("{}x", "> ".repeat(DEPTH))).blocks;
+        let mut depth = 0;
+        while let [Block::BlockQuote(inner)] = blocks.as_mut_slice() {
+            depth += 1;
+            blocks = mem::take(inner);
+        }
+        assert_eq!(depth, MAX_NESTING);
+        let rest = format!("{}x", "> ".repeat(DEPTH - MAX_NESTING));
+        assert_eq!(blocks, vec![para(vec![text(rest.trim())])]);
     }
 
     #[test]
