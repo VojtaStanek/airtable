@@ -300,9 +300,6 @@ impl Parser {
         if after.is_whitespace() || (len == 1 && after == delimiter) {
             return None;
         }
-        if delimiter == '_' && i > 0 && chars[i - 1].is_alphanumeric() {
-            return None;
-        }
         let end = find_closer(chars, start, delimiter, len)?;
         let inner = self.parse_inlines(&chars[start..end]);
         let node = match (delimiter, len) {
@@ -767,6 +764,15 @@ mod tests {
     fn intraword_underscore() {
         assert_eq!(inline("snake_case_name"), vec![text("snake_case_name")]);
         assert_eq!(inline("__a__b"), vec![text("__a__b")]);
+    }
+
+    #[test]
+    fn intraword_opener() {
+        let formatted =
+            |node: fn(Inlines) -> Inline| vec![text("foo"), node(inlines(vec![text("bar")]))];
+        assert_eq!(inline("foo_bar_"), formatted(Inline::Italic));
+        assert_eq!(inline("foo**bar**"), formatted(Inline::Bold));
+        assert_eq!(inline("foo~~bar~~"), formatted(Inline::Strikethrough));
     }
 
     #[test]
