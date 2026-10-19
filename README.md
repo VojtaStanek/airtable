@@ -43,3 +43,14 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     Ok(())
 }
 ```
+
+## Rich text (Markdown)
+
+Long text fields with rich text formatting enabled use [Airtable's Markdown dialect](https://support.airtable.com/articles/3884632156-using-markdown-in-airtable). `airtable::markdown::parse` turns that text into an AST: headings, paragraphs, quotes, nested bullet, ordered and checklist lists, code blocks, bold, italic, strikethrough, inline code and links. Every line is its own block, and blank lines are kept as `Block::Empty`. Parsing never fails; anything that isn't valid syntax stays as literal text. The AST implements `serde::Serialize`.
+
+```rust
+use airtable::markdown::{parse, Block};
+
+let doc = parse("# Title\n- **bold** item\n[x] done");
+assert!(matches!(doc.blocks[0], Block::Heading { level: 1, .. }));
+```

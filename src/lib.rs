@@ -50,6 +50,7 @@ use thiserror::Error;
 pub mod formulas;
 mod list_builder;
 mod macros;
+pub mod markdown;
 
 pub use list_builder::ListRecords;
 pub use macros::*;
