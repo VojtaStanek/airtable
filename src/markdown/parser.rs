@@ -148,60 +148,11 @@ fn line<'i, 'a: 'i, O>(
 }
 
 #[cfg(test)]
-mod test_helpers {
-    use crate::markdown::{parse, Block, Inline, Inlines, List, ListItem, ListKind};
-
-    pub(super) fn text(s: &str) -> Inline {
-        Inline::Text(s.to_string())
-    }
-
-    pub(super) fn inlines(nodes: Vec<Inline>) -> Inlines {
-        Inlines(nodes)
-    }
-
-    pub(super) fn para(nodes: Vec<Inline>) -> Block {
-        Block::Paragraph(inlines(nodes))
-    }
-
-    pub(super) fn heading(level: u8, s: &str) -> Block {
-        Block::Heading {
-            level,
-            content: inlines(vec![text(s)]),
-        }
-    }
-
-    pub(super) fn item(s: &str, children: Vec<List>) -> ListItem {
-        ListItem {
-            checked: None,
-            content: inlines(vec![text(s)]),
-            children,
-        }
-    }
-
-    pub(super) fn check(checked: bool, s: &str) -> ListItem {
-        ListItem {
-            checked: Some(checked),
-            ..item(s, vec![])
-        }
-    }
-
-    pub(super) fn list(kind: ListKind, items: Vec<ListItem>) -> List {
-        List { kind, items }
-    }
-
-    pub(super) fn inline(s: &str) -> Vec<Inline> {
-        match parse(s).blocks.as_slice() {
-            [Block::Paragraph(content)] => content.0.clone(),
-            other => panic!("expected a single paragraph, got {other:?}"),
-        }
-    }
-}
-
-#[cfg(test)]
 mod tests {
     use std::mem;
 
-    use super::{test_helpers::*, MAX_NESTING};
+    use super::MAX_NESTING;
+    use crate::markdown::test_helpers::*;
     use crate::markdown::{parse, Block, Document, Inline, List, ListItem, ListKind};
 
     #[test]

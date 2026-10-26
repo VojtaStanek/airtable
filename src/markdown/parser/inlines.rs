@@ -244,7 +244,7 @@ fn find_bracket_close(text: &str) -> Option<usize> {
 mod tests {
     use std::mem;
 
-    use super::super::test_helpers::*;
+    use crate::markdown::test_helpers::*;
     use super::MAX_NESTING;
     use crate::markdown::{Inline, Inlines};
 

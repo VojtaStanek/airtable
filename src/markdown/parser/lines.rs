@@ -93,7 +93,7 @@ fn ws<'a>(input: &mut &'a str) -> Result<&'a str> {
 
 #[cfg(test)]
 mod tests {
-    use super::super::test_helpers::*;
+    use crate::markdown::test_helpers::*;
     use crate::markdown::{parse, Block, Inline, Inlines, ListItem, ListKind};
 
     #[test]

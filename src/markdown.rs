@@ -25,6 +25,9 @@ use std::ops::Deref;
 use serde::Serialize;
 
 mod parser;
+#[cfg(test)]
+mod test_helpers;
+mod writer;
 
 pub use parser::parse;
 
