@@ -527,7 +527,7 @@ impl<HEIM: HasEnterpriseIdMarker> Airtable<HEIM> {
         let mut records = records.into_iter();
         while records.len() > 0 {
             let chunk = (&mut records).take(10).collect();
-            self.update_records_inner::<_, ()>(table, chunk, None)
+            self.update_records_inner::<_, serde::de::IgnoredAny>(table, chunk, None)
                 .await?;
         }
 
@@ -599,14 +599,7 @@ impl<HEIM: HasEnterpriseIdMarker> Airtable<HEIM> {
             }
         }
 
-        // Try to deserialize the response.
-        match resp.json::<APICall<Out>>().await {
-            Ok(v) => Ok(v.records),
-            Err(_) => {
-                // This might fail. On a faiture just return an empty vector.
-                Ok(vec![])
-            }
-        }
+        Ok(resp.json::<APICall<Out>>().await?.records)
     }
 
     /// Bulk upsert records in a table.
@@ -673,14 +666,7 @@ impl<HEIM: HasEnterpriseIdMarker> Airtable<HEIM> {
             }
         }
 
-        // Try to deserialize the response.
-        match resp.json::<APICall<T>>().await {
-            Ok(v) => Ok(v.records),
-            Err(_) => {
-                // This might fail. On a faiture just return an empty vector.
-                Ok(vec![])
-            }
-        }
+        Ok(resp.json::<APICall<T>>().await?.records)
     }
 }
 
