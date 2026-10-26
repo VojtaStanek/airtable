@@ -1039,7 +1039,7 @@ pub struct Record<T> {
     #[serde(default, skip_serializing_if = "String::is_empty")]
     pub id: String,
     pub fields: T,
-    #[serde(skip_serializing_if = "Option::is_none")]
+    #[serde(rename = "createdTime", skip_serializing)]
     pub created_time: Option<DateTime<Utc>>,
 }
 
